@@ -125,34 +125,35 @@ Deferred deliberately, with reasons — not forgotten:
    are. The bug it would have been aimed at (see the DMA drain in
    `display_fill_rect`) was found by reading, and sat outside that diff. A run
    scoped to the whole tree is still the highest-value gap.
-2. **No unwind on `display_init()` failure** — `s_panel` stays non-NULL, the
-   module wedges, SPI bus and panel objects leak. Unreachable today because
-   `ESP_ERROR_CHECK` aborts first. Wants a `fail:` label and a separate
-   `s_ready` flag as the guard. The drain added before the fill-buffer free is
-   one more early return on that path, and leaves `s_fill_buf` allocated as
-   well, so the label now has more to clean up than when this was written.
-3. **"Don't mix drawing paths" is prose, not code.** Nothing stops a caller
+2. **"Don't mix drawing paths" is prose, not code.** Nothing stops a caller
    using `display_fill*` after LVGL owns the panel. Becomes real the first time
    something draws a splash before LVGL starts. `fill_buf_wait_idle()` does not
    help here: it protects the fill buffer from the previous *fill*, not from
    LVGL.
-4. **PSRAM disabled** — 8 MB unused. Enable when there is something cold to put
+3. **PSRAM disabled** — 8 MB unused. Enable when there is something cold to put
    there. Do *not* move LVGL draw buffers into it; the software renderer does
    per-pixel read-modify-write and PSRAM is ~10× slower.
-5. **Stack smashing protection off** — turn on the day an HTTP or JSON parser
+4. **Stack smashing protection off** — turn on the day an HTTP or JSON parser
    lands. That is the bug class it catches.
-6. **The initial black clear in `display_init()`** costs ~23 ms and 115 kB of
+5. **The initial black clear in `display_init()`** costs ~23 ms and 115 kB of
    SPI at boot, painting a frame nobody sees under a backlight still at zero.
    It is also the only reason the 9.6 kB DMA buffer is allocated during init at
    all. Kept deliberately as defence for a future splash path; recorded here so
    it is a decision rather than an oversight.
-7. **`CONFIG_FREERTOS_HZ=1000`** buys 1 ms granularity that nothing currently
+6. **`CONFIG_FREERTOS_HZ=1000`** buys 1 ms granularity that nothing currently
    needs — the LVGL tick is 10 ms and the shortest delay in the tree is 30 ms.
    The comment claiming the display wants it has been corrected; the value
    itself is still an open question, worth ~900 timer interrupts/s.
+7. **Only one of `display_init()`'s six failure exits has actually executed.**
+   The unwind was tested by injecting a failure at the last and most
+   resource-heavy point. Earlier failures take shorter paths through the same
+   label and remain reasoned-about rather than run. Testing each would cost a
+   flash cycle apiece for progressively less information; noted so the gap is
+   known rather than assumed closed.
 
 Closed: the partition table now carries two 4 MB OTA slots, the build uses
-`-Os`, and every commit's author address is the GitHub noreply one.
+`-Os`, every commit's author address is the GitHub noreply one, and
+`display_init()` unwinds on failure.
 
 ## Not yet decided
 

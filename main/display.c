@@ -1,6 +1,7 @@
 #include "display.h"
 
 #include <endian.h>   /* htobe16 */
+#include <stdbool.h>
 #include <string.h>
 #include <sys/param.h>  /* MIN */
 
@@ -65,6 +66,13 @@ static const char *TAG = "display";
 
 static esp_lcd_panel_handle_t s_panel;
 static esp_lcd_panel_io_handle_t s_io;
+
+/* Whether the module is usable, tracked separately from s_panel rather than
+ * inferred from it. A non-NULL panel only means the object was created — it can
+ * be a panel whose reset or init failed, and answering "initialised?" with it
+ * would let a caller that survives a failed display_init() draw through a
+ * half-built panel and re-enter init on top of a bus that is already held. */
+static bool s_ready;
 
 /* Scratch buffer for fills, one chunk of DISPLAY_DRAW_ROWS rows: 240 px * 20
  * rows * 2 B = 9.6 kB, a comfortable DRAM allocation where a whole 240x240
@@ -147,8 +155,11 @@ esp_err_t display_fade_backlight(uint8_t percent, uint32_t ms)
 
 esp_err_t display_init(void)
 {
-    ESP_RETURN_ON_FALSE(s_panel == NULL, ESP_ERR_INVALID_STATE, TAG,
+    ESP_RETURN_ON_FALSE(!s_ready, ESP_ERR_INVALID_STATE, TAG,
                         "already initialised");
+
+    esp_err_t ret = ESP_OK;
+    bool bus_taken = false;
 
     ESP_LOGI(TAG, "SPI bus: mosi=%d sclk=%d @ %d MHz",
              PIN_MOSI, PIN_SCLK, LCD_PIXEL_CLOCK_HZ / 1000000);
@@ -158,8 +169,9 @@ esp_err_t display_init(void)
      * of the two and sizing to the fill buffer would silently truncate it. */
     const spi_bus_config_t bus =
         GC9A01_PANEL_BUS_SPI_CONFIG(PIN_SCLK, PIN_MOSI, DISPLAY_MAX_TRANSFER_SZ);
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO),
-                        TAG, "spi_bus_initialize");
+    ESP_GOTO_ON_ERROR(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO),
+                      fail, TAG, "spi_bus_initialize");
+    bus_taken = true;
 
     ESP_LOGI(TAG, "panel IO: cs=%d dc=%d", PIN_CS, PIN_DC);
 
@@ -172,9 +184,9 @@ esp_err_t display_init(void)
         .lcd_cmd_bits      = 8,
         .lcd_param_bits    = 8,
     };
-    ESP_RETURN_ON_ERROR(
+    ESP_GOTO_ON_ERROR(
         esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io),
-        TAG, "new_panel_io_spi");
+        fail, TAG, "new_panel_io_spi");
 
     ESP_LOGI(TAG, "GC9A01 panel: rst=%d bgr=%d invert=%d",
              PIN_RST, PANEL_BGR_ORDER, PANEL_INVERT);
@@ -185,27 +197,33 @@ esp_err_t display_init(void)
                                           : LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_gc9a01(s_io, &panel_cfg, &s_panel),
-                        TAG, "new_panel_gc9a01");
+    ESP_GOTO_ON_ERROR(esp_lcd_new_panel_gc9a01(s_io, &panel_cfg, &s_panel),
+                      fail, TAG, "new_panel_gc9a01");
 
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "panel_reset");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "panel_init");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel, PANEL_INVERT),
-                        TAG, "panel_invert");
+    ESP_GOTO_ON_ERROR(esp_lcd_panel_reset(s_panel), fail, TAG, "panel_reset");
+    ESP_GOTO_ON_ERROR(esp_lcd_panel_init(s_panel), fail, TAG, "panel_init");
+    ESP_GOTO_ON_ERROR(esp_lcd_panel_invert_color(s_panel, PANEL_INVERT),
+                      fail, TAG, "panel_invert");
 
     /* Orientation belongs here with the other panel facts, not in the graphics
      * layer. Setting it via LVGL's port config would work, but LVGL applies it
      * by mirroring this same panel behind our back, which leaves the self-test
      * path running an orientation the product never ships with, and silently
      * changes what display_fill_rect's y axis means partway through boot. */
-    ESP_RETURN_ON_ERROR(
+    ESP_GOTO_ON_ERROR(
         esp_lcd_panel_mirror(s_panel, PANEL_MIRROR_X, PANEL_MIRROR_Y),
-        TAG, "panel_mirror");
+        fail, TAG, "panel_mirror");
+
+    /* Fills are legal from here: the panel is configured, and s_ready is what
+     * display_fill_rect checks. Cleared again by the unwind below, so a failed
+     * init does not leave the fill path enabled against a half-built panel. */
+    s_ready = true;
 
     /* Clear before switching on, so the first thing shown is black rather than
      * whatever noise the panel RAM powered up holding. */
-    ESP_RETURN_ON_ERROR(display_fill(COLOR_BLACK), TAG, "initial clear");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "disp_on");
+    ESP_GOTO_ON_ERROR(display_fill(COLOR_BLACK), fail, TAG, "initial clear");
+    ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), fail, TAG,
+                      "disp_on");
 
     /* In the normal build that clear is the only fill there will ever be —
      * LVGL takes the panel from here and brings its own buffers. Hand the DMA
@@ -217,14 +235,51 @@ esp_err_t display_init(void)
      * purely because sending a command reclaims queued descriptors. Relying on
      * that means these two lines cannot be reordered without silent corruption,
      * so state the dependency instead of resting on it. */
-    ESP_RETURN_ON_ERROR(fill_buf_wait_idle(), TAG, "drain before free");
+    ESP_GOTO_ON_ERROR(fill_buf_wait_idle(), fail, TAG, "drain before free");
     heap_caps_free(s_fill_buf);
     s_fill_buf = NULL;
 
-    ESP_RETURN_ON_ERROR(backlight_init(), TAG, "backlight_init");
+    ESP_GOTO_ON_ERROR(backlight_init(), fail, TAG, "backlight_init");
 
     ESP_LOGI(TAG, "display ready (%dx%d)", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     return ESP_OK;
+
+    /* Unwind in reverse order of construction, so a failed init leaves nothing
+     * behind and can be retried. Unreachable while app_main wraps this in
+     * ESP_ERROR_CHECK — that aborts before any of this runs — but the moment
+     * there is a caller that wants to survive a failure, the alternative is a
+     * module that reports failure while holding the SPI bus and looking
+     * initialised to display_panel_handle().
+     *
+     * Each step is conditional because failure can arrive at any point, so this
+     * label is reached with any prefix of the construction done. */
+fail:
+    s_ready = false;
+
+    /* The fill buffer is only allocated if a fill ran, which needs a panel, so
+     * this is a no-op on the early paths. Drain first for the same reason the
+     * success path does — the failing call may have left a transfer queued. */
+    if (s_fill_buf != NULL) {
+        if (s_io != NULL) {
+            fill_buf_wait_idle();
+        }
+        heap_caps_free(s_fill_buf);
+        s_fill_buf = NULL;
+    }
+    if (s_panel != NULL) {
+        esp_lcd_panel_del(s_panel);
+        s_panel = NULL;
+    }
+    if (s_io != NULL) {
+        esp_lcd_panel_io_del(s_io);
+        s_io = NULL;
+    }
+    if (bus_taken) {
+        spi_bus_free(LCD_HOST);
+    }
+
+    ESP_LOGE(TAG, "display_init failed: %s", esp_err_to_name(ret));
+    return ret;
 }
 
 esp_lcd_panel_handle_t display_panel_handle(void)
@@ -239,7 +294,7 @@ esp_lcd_panel_io_handle_t display_io_handle(void)
 
 esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
 {
-    ESP_RETURN_ON_FALSE(s_panel != NULL, ESP_ERR_INVALID_STATE, TAG,
+    ESP_RETURN_ON_FALSE(s_ready, ESP_ERR_INVALID_STATE, TAG,
                         "not initialised");
 
     /* Clip to the panel. Callers doing animation are allowed to walk a shape
