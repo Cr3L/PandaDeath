@@ -1,5 +1,7 @@
 #include "selftest.h"
 
+#include <stddef.h>
+
 #include "display.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -37,10 +39,11 @@ static void run_color_test(void)
         { "WHITE", COLOR_WHITE },
     };
 
-    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+    const size_t n = sizeof(steps) / sizeof(steps[0]);
+
+    for (size_t i = 0; i < n; i++) {
         ESP_LOGI(TAG, "colour test %u/%u: %s",
-                 (unsigned)(i + 1), (unsigned)(sizeof(steps) / sizeof(steps[0])),
-                 steps[i].name);
+                 (unsigned)(i + 1), (unsigned)n, steps[i].name);
         TRY(display_fill(steps[i].color));
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
@@ -82,13 +85,20 @@ static void run_geometry_test(void)
     TRY(display_fill_rect(cx - square / 2, cy - square / 2,
                           square, square, COLOR_GREEN));
 
-    /* Cardinal markers. Equal distances confirm no axis is being scaled. */
-    TRY(display_fill_rect(cx - marker / 2, inset, marker, marker, COLOR_RED));
-    TRY(display_fill_rect(cx - marker / 2, DISPLAY_HEIGHT - inset - marker,
-                          marker, marker, COLOR_RED));
-    TRY(display_fill_rect(inset, cy - marker / 2, marker, marker, COLOR_RED));
-    TRY(display_fill_rect(DISPLAY_WIDTH - inset - marker, cy - marker / 2,
-                          marker, marker, COLOR_RED));
+    /* Cardinal markers. Equal distances confirm no axis is being scaled, so the
+     * four positions are listed together where that symmetry is checkable by
+     * eye rather than spread over four near-identical calls. */
+    const struct { int x, y; } markers[] = {
+        { cx - marker / 2, inset                          },  /* north */
+        { cx - marker / 2, DISPLAY_HEIGHT - inset - marker },  /* south */
+        { inset,           cy - marker / 2                },  /* west  */
+        { DISPLAY_WIDTH - inset - marker, cy - marker / 2 },  /* east  */
+    };
+
+    for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+        TRY(display_fill_rect(markers[i].x, markers[i].y,
+                              marker, marker, COLOR_RED));
+    }
 
     vTaskDelay(pdMS_TO_TICKS(20000));
 }
@@ -111,11 +121,12 @@ static void run_motion_test(void)
         vTaskDelay(pdMS_TO_TICKS(30));
         TRY(display_fill_rect(x, y, size, size, COLOR_BLACK));
 
-        y += step;
-        if (y <= 0 || y + size >= DISPLAY_HEIGHT) {
+        /* Turn around before moving rather than after, so the square never
+         * takes a step it has to undo. */
+        if (y + step < 0 || y + step + size > DISPLAY_HEIGHT) {
             step = -step;
-            y += step;
         }
+        y += step;
     }
 }
 

@@ -1,5 +1,6 @@
 #include "display.h"
 
+#include <endian.h>   /* htobe16 */
 #include <string.h>
 #include <sys/param.h>  /* MIN */
 
@@ -55,11 +56,6 @@ static const char *TAG = "display";
 #define PANEL_BGR_ORDER true
 #define PANEL_INVERT    true
 
-/* Rows painted per SPI transaction. 240 px * 20 rows * 2 B = 9.6 kB, which is a
- * comfortable DRAM allocation; a whole 240x240 frame would be 115 kB and is not
- * worth reserving for solid fills. */
-#define FILL_CHUNK_ROWS DISPLAY_DRAW_ROWS
-
 #define BL_LEDC_TIMER    LEDC_TIMER_0
 #define BL_LEDC_CHANNEL  LEDC_CHANNEL_0
 #define BL_LEDC_MODE     LEDC_LOW_SPEED_MODE
@@ -70,16 +66,15 @@ static const char *TAG = "display";
 static esp_lcd_panel_handle_t s_panel;
 static esp_lcd_panel_io_handle_t s_io;
 
-/* The panel takes pixels big-endian; callers pass host-order RGB565. */
-#define RGB565_SWAP(c) ((uint16_t)((((c) & 0xFF) << 8) | (((c) >> 8) & 0xFF)))
-
-/* Scratch buffer for fills. Allocated on first use and reused, so an animation
- * does not put a malloc/free pair in every frame, but not held when nothing is
- * filling: once LVGL owns the panel these helpers go idle, and 9.6 kB of
- * DMA-capable internal DRAM is the same scarce pool Wi-Fi draws from.
- * Not re-entrant: fills are expected from a single task. */
+/* Scratch buffer for fills, one chunk of DISPLAY_DRAW_ROWS rows: 240 px * 20
+ * rows * 2 B = 9.6 kB, a comfortable DRAM allocation where a whole 240x240
+ * frame would be 115 kB and is not worth reserving for solid fills.
+ *
+ * Allocated on first use and reused, so an animation does not put a malloc/free
+ * pair in every frame, but not held when nothing is filling: once LVGL owns the
+ * panel these helpers go idle, and DMA-capable internal DRAM is the same scarce
+ * pool Wi-Fi draws from. Not re-entrant: fills are expected from a single task. */
 static uint16_t *s_fill_buf;
-#define FILL_BUF_PX (DISPLAY_WIDTH * FILL_CHUNK_ROWS)
 
 static esp_err_t backlight_init(void)
 {
@@ -111,18 +106,15 @@ static esp_err_t backlight_init(void)
 
 static uint32_t backlight_duty(uint8_t percent)
 {
-    if (percent > 100) {
-        percent = 100;
-    }
-    return (uint32_t)percent * BL_DUTY_MAX / 100;
+    return (uint32_t)MIN(percent, 100) * BL_DUTY_MAX / 100;
 }
 
 esp_err_t display_set_backlight(uint8_t percent)
 {
-    ESP_RETURN_ON_ERROR(
-        ledc_set_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL, backlight_duty(percent)),
-        TAG, "set duty");
-    return ledc_update_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL);
+    /* The driver's combined form, not set_duty + update_duty: ledc.h documents
+     * that pair as not thread safe and points here instead. */
+    return ledc_set_duty_and_update(BL_LEDC_MODE, BL_LEDC_CHANNEL,
+                                    backlight_duty(percent), 0);
 }
 
 esp_err_t display_fade_backlight(uint8_t percent, uint32_t ms)
@@ -260,27 +252,27 @@ esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
         /* DMA-capable memory is required: the SPI driver cannot transfer from
          * the stack, and on PSRAM-equipped modules the general heap may not be
          * DMA reachable. */
-        s_fill_buf = heap_caps_malloc(FILL_BUF_PX * sizeof(uint16_t),
+        s_fill_buf = heap_caps_malloc(DISPLAY_DRAW_BUF_PX * sizeof(uint16_t),
                                       MALLOC_CAP_DMA);
         ESP_RETURN_ON_FALSE(s_fill_buf != NULL, ESP_ERR_NO_MEM, TAG,
-                            "fill buffer (%d px)", FILL_BUF_PX);
+                            "fill buffer (%d px)", DISPLAY_DRAW_BUF_PX);
     }
 
     /* Only the first chunk's worth needs filling; every band re-sends it. */
-    const size_t buf_px = (size_t)w * MIN(h, FILL_CHUNK_ROWS);
+    const size_t buf_px = (size_t)w * MIN(h, DISPLAY_DRAW_ROWS);
 
     /* The clipping above already guarantees this. Checked anyway because the
      * cost is one comparison and the failure mode it guards is a silent write
      * past the end of a DMA buffer. */
-    ESP_RETURN_ON_FALSE(buf_px <= FILL_BUF_PX, ESP_ERR_INVALID_SIZE, TAG,
+    ESP_RETURN_ON_FALSE(buf_px <= DISPLAY_DRAW_BUF_PX, ESP_ERR_INVALID_SIZE, TAG,
                         "fill %dx%d exceeds buffer", w, h);
-    const uint16_t swapped = RGB565_SWAP(color);
+    const uint16_t swapped = htobe16(color);
     for (size_t i = 0; i < buf_px; i++) {
         s_fill_buf[i] = swapped;
     }
 
-    for (int row = y; row < y + h; row += FILL_CHUNK_ROWS) {
-        const int rows = MIN(FILL_CHUNK_ROWS, y + h - row);
+    for (int row = y; row < y + h; row += DISPLAY_DRAW_ROWS) {
+        const int rows = MIN(DISPLAY_DRAW_ROWS, y + h - row);
         const esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, x, row,
                                                        x + w, row + rows,
                                                        s_fill_buf);

@@ -1,5 +1,7 @@
 #include "ui.h"
 
+#include <stdint.h>
+
 #include "display.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -21,8 +23,9 @@ static const char *TAG = "ui";
  * renderer does per-pixel read-modify-write here, and WROVER PSRAM is roughly
  * an order of magnitude slower, which would push render time past flush time.
  *
- * Shared with display.h so the SPI bus transfer limit covers this buffer. */
-#define LVGL_BUFFER_ROWS DISPLAY_DRAW_ROWS
+ * The row count and the resulting pixel count both come from display.h, so the
+ * SPI bus transfer limit is sized from the same numbers rather than from a
+ * second expression that has to agree with them by eye. */
 
 /* Screen palette. Kept together so a retheme is one edit rather than a hunt
  * through widget setup. */
@@ -38,6 +41,16 @@ static lv_obj_t *s_value_label;
 static void arc_anim_cb(void *obj, int32_t value)
 {
     lv_arc_set_value((lv_obj_t *)obj, value);
+
+    /* The exec callback fires every refresh, but the animation only crosses an
+     * integer boundary a fraction of those times. Reformatting an unchanged
+     * string would reallocate the label text out of the 16 kB LVGL pool and
+     * invalidate the centre of the screen for a repaint of identical pixels. */
+    static int32_t last_shown = INT32_MIN;
+    if (value == last_shown) {
+        return;
+    }
+    last_shown = value;
     lv_label_set_text_fmt(s_value_label, "%d", (int)value);
 }
 
@@ -101,7 +114,7 @@ esp_err_t ui_init(void)
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle    = display_io_handle(),
         .panel_handle = display_panel_handle(),
-        .buffer_size  = DISPLAY_WIDTH * LVGL_BUFFER_ROWS,
+        .buffer_size  = DISPLAY_DRAW_BUF_PX,
         .double_buffer = true,
         .hres         = DISPLAY_WIDTH,
         .vres         = DISPLAY_HEIGHT,
@@ -117,9 +130,7 @@ esp_err_t ui_init(void)
         },
         .flags = {
             .buff_dma   = true,
-            /* The panel takes pixels big-endian, matching the byte swap the
-             * display driver does for its own fills. */
-            .swap_bytes = true,
+            .swap_bytes = PANEL_SWAP_BYTES,
         },
     };
 
@@ -139,6 +150,6 @@ esp_err_t ui_init(void)
     lvgl_port_unlock();
 
     ESP_LOGI(TAG, "lvgl running (%dx%d, %d-row buffers)",
-             DISPLAY_WIDTH, DISPLAY_HEIGHT, LVGL_BUFFER_ROWS);
+             DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_DRAW_ROWS);
     return ESP_OK;
 }

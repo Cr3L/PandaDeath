@@ -20,13 +20,18 @@
 #define PANEL_MIRROR_X false
 #define PANEL_MIRROR_Y true
 
+/* The panel takes pixels big-endian. Public for the same reason the mirroring
+ * is: the fill path here byte-swaps its own pixels, and LVGL has to be told to
+ * swap its own, so the fact has two consumers and must not be stated twice. */
+#define PANEL_SWAP_BYTES true
+
 /* Rows per draw buffer, shared by this module's fill chunks and by LVGL's draw
  * buffers so that the SPI bus transfer limit below covers both. Keeping them on
  * one constant is deliberate: sizing the bus to the smaller of two independent
  * numbers truncates the larger transfer, and does it silently. */
-#define DISPLAY_DRAW_ROWS 20
-#define DISPLAY_MAX_TRANSFER_SZ \
-    (DISPLAY_WIDTH * DISPLAY_DRAW_ROWS * (int)sizeof(uint16_t))
+#define DISPLAY_DRAW_ROWS   20
+#define DISPLAY_DRAW_BUF_PX (DISPLAY_WIDTH * DISPLAY_DRAW_ROWS)
+#define DISPLAY_MAX_TRANSFER_SZ (DISPLAY_DRAW_BUF_PX * (int)sizeof(uint16_t))
 
 /* Colours are plain RGB565 in host byte order. The byte swap the panel needs is
  * an internal detail of the fill path, so callers never see it. */

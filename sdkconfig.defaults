@@ -3,7 +3,10 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
-# 1 kHz tick keeps vTaskDelay granularity at 1 ms, which the display timing wants.
+# 1 kHz tick keeps vTaskDelay granularity at 1 ms. Nothing needs that yet — the
+# LVGL tick is 10 ms and the shortest delay in the tree is 30 ms — so this is
+# headroom, not a requirement, and it costs ~900 extra timer interrupts/s.
+# Revisit at 100 Hz if the tick ISR ever shows up competing with Wi-Fi.
 CONFIG_FREERTOS_HZ=1000
 
 # LVGL ships only Montserrat 14 by default; the UI uses 28 for the centre value.
