@@ -1,3 +1,4 @@
+#include "boot_mode.h"
 #include "display.h"
 #include "selftest.h"
 #include "ui.h"
@@ -8,10 +9,6 @@
 #include "freertos/task.h"
 
 static const char *TAG = "main";
-
-/* Set to 1 to run the raw panel self-test instead of the LVGL UI. See
- * selftest.h for why it is kept. */
-#define RUN_HARDWARE_SELFTEST 0
 
 #define BACKLIGHT_FADE_MS 400
 
@@ -24,7 +21,7 @@ void app_main(void)
      * nothing is shown until there is something worth showing. */
     ESP_ERROR_CHECK(display_init());
 
-#if RUN_HARDWARE_SELFTEST
+#if BOOT_MODE == BOOT_MODE_SELFTEST
     ESP_ERROR_CHECK(display_fade_backlight(100, BACKLIGHT_FADE_MS));
     run_selftest();
 #else
