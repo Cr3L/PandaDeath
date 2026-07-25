@@ -13,17 +13,28 @@ is what stops people reading the live ones.
 
 ---
 
-## 1. No correctness pass over the firmware as a whole
+## 1. The whole-tree correctness pass was a hand read, not a tool
 
-`/code-review ultra` has run once, scoped to a two-commit cleanup diff, and
-returned nothing — which says the cleanup was clean, not that `display.c` and
-`ui.c` are. The one real bug found so far (the DMA drain in
-`display_fill_rect`) came from reading the esp_lcd source, which is not a
-repeatable process.
+Every source file, plus the build config and `tools/capture.py`, has now been
+read end to end against the esp_lcd and LEDC sources. That produced eight
+findings, all fixed. So the gap this item described is largely closed — by one
+reading, which is as repeatable as the reader.
 
-**Why it waits:** nothing blocks it. This is the largest gap on the list.
+`/code-review ultra` cannot substitute, and it is worth recording why so the
+next person does not spend a run learning it: the command is diff-scoped
+against the branch upstream. Passing "review the whole project" as an argument
+is recorded as a note and does not change the scope — two runs have now
+returned zero findings on narrow diffs, which reads as a clean bill of health
+for the project and is not one. Forcing whole-tree scope means constructing a
+PR against an empty base, which is a contrivance rather than a workflow.
 
-**Trigger:** run it scoped to the whole tree, not a branch diff.
+**Why it waits:** the cheap version is done. What remains is a second
+*independent* read, and a second pass by the same reader is worth much less
+than the first.
+
+**Trigger:** a reviewer who is not me — a human, or ultra pointed at a diff
+that genuinely contains the files. Otherwise this closes on its own as each
+future change gets reviewed on the way in.
 
 ## 2. "Don't mix drawing paths" is prose, not code
 
