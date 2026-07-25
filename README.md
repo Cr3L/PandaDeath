@@ -71,6 +71,27 @@ Holding BOOT on a board that is already running does nothing useful — it has t
 be held across an actual power-on. After flashing, **physically replug again** to
 run the new app.
 
+### Two different replugs
+
+These are easy to conflate and the symptoms are confusing when you do:
+
+| Goal | Gesture |
+|---|---|
+| **Flash** new firmware | unplug → **hold BOOT** → replug → hold 2–3 s → release |
+| **Run** what is flashed | unplug → replug, **touching nothing** |
+
+Holding BOOT during what was meant to be a plain replug leaves the board in
+download mode: the app never starts, so the screen stays completely dark and
+nothing is printed on serial. A powered board that is silent *and* dark is
+almost always this, not a crash. Confirm with:
+
+```sh
+python -m esptool --chip esp32 -p /dev/ttyUSB0 --before no_reset chip_id
+```
+
+If that connects without the BOOT sequence, the board was already sitting in the
+bootloader.
+
 ### Watching the serial log
 
 `idf.py monitor` needs a TTY. For scripted capture use:
@@ -96,6 +117,12 @@ Two settings could not be resolved by reading code and are isolated at the top o
 `LCD_PIXEL_CLOCK_HZ` is 40 MHz. BTT runs this panel at 80 MHz, so there is
 headroom, but a marginal signal shows up as sparkle or a dead panel rather than a
 clean error.
+
+**Orientation** is set in [`main/ui.c`](main/ui.c) via `mirror_y`. The panel's
+native scan order is a *reflection*, not a rotation — so it needs an odd number
+of axis flips to correct. Mirroring both axes looks like an obvious fix and is
+wrong: that is a 180° rotation, which leaves text upright but reading backwards,
+as if seen from behind the screen.
 
 ## Verifying changes on hardware
 

@@ -85,10 +85,13 @@ esp_err_t ui_init(void)
         .vres         = DISPLAY_HEIGHT,
         .monochrome   = false,
         .color_format = LV_COLOR_FORMAT_RGB565,
+        /* The panel's native scan order is a reflection, not a rotation, so a
+         * single axis is mirrored here. Mirroring both instead yields a 180
+         * degree rotation, which leaves text upright but reversed. */
         .rotation = {
             .swap_xy  = false,
             .mirror_x = false,
-            .mirror_y = false,
+            .mirror_y = true,
         },
         .flags = {
             .buff_dma   = true,
