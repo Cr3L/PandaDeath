@@ -1,4 +1,5 @@
 #include "display.h"
+#include "ui.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -6,6 +7,13 @@
 #include "freertos/task.h"
 
 static const char *TAG = "main";
+
+/* Set to 1 to run the raw panel self-test instead of the LVGL UI. Kept because
+ * it is the fastest way to tell a wiring or panel-config fault from a graphics
+ * fault, and it will be wanted again when bringing up a different board. */
+#define RUN_HARDWARE_SELFTEST 0
+
+#if RUN_HARDWARE_SELFTEST
 
 /* Abandon the current test on a draw failure, but leave the device running.
  * ESP_ERROR_CHECK would panic and reboot, which on a board that needs a manual
@@ -115,9 +123,18 @@ static void run_motion_test(void)
     }
 }
 
+static void run_selftest(void)
+{
+    run_color_test();
+    run_geometry_test();
+    run_motion_test();
+}
+
+#endif /* RUN_HARDWARE_SELFTEST */
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "PandaDeath starting: GC9A01 bring-up on Knomi V1");
+    ESP_LOGI(TAG, "PandaDeath starting on Knomi V1");
 
     /* Init failure stays fatal: there is no useful fallback for a device whose
      * only output is the screen. */
@@ -129,13 +146,14 @@ void app_main(void)
         ESP_ERROR_CHECK(display_set_backlight((uint8_t)pct));
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    ESP_LOGI(TAG, "backlight at 100%%");
 
-    run_color_test();
-    run_geometry_test();
-    run_motion_test();
+#if RUN_HARDWARE_SELFTEST
+    run_selftest();
+#else
+    ESP_ERROR_CHECK(ui_init());
+#endif
 
-    ESP_LOGW(TAG, "all tests ended; idling");
+    /* LVGL runs in its own task; nothing further is needed here. */
     while (true) {
         vTaskDelay(portMAX_DELAY);
     }

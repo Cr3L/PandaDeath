@@ -27,6 +27,12 @@ esp_err_t display_init(void);
 /* Backlight duty, 0 (off) to 100 (full). */
 esp_err_t display_set_backlight(uint8_t percent);
 
+/* Panel handles, for handing the display to a graphics library. NULL before
+ * display_init() succeeds. Anything drawing through these owns the panel; the
+ * display_fill* helpers below must not be used at the same time. */
+esp_lcd_panel_handle_t display_panel_handle(void);
+esp_lcd_panel_io_handle_t display_io_handle(void);
+
 /* Paints the whole panel a single RGB565 colour (unswapped, e.g. COLOR_RED). */
 esp_err_t display_fill(uint16_t color);
 

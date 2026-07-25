@@ -64,6 +64,7 @@ static const char *TAG = "display";
 #define BL_DUTY_MAX      ((1 << 10) - 1)
 
 static esp_lcd_panel_handle_t s_panel;
+static esp_lcd_panel_io_handle_t s_io;
 
 /* Scratch buffer for fills, allocated once. Sized for the widest possible
  * chunk, so any rectangle up to full width reuses it. Allocating per call
@@ -136,7 +137,6 @@ esp_err_t display_init(void)
 
     ESP_LOGI(TAG, "panel IO: cs=%d dc=%d", PIN_CS, PIN_DC);
 
-    esp_lcd_panel_io_handle_t io = NULL;
     const esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num       = PIN_CS,
         .dc_gpio_num       = PIN_DC,
@@ -147,7 +147,7 @@ esp_err_t display_init(void)
         .lcd_param_bits    = 8,
     };
     ESP_RETURN_ON_ERROR(
-        esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io),
+        esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io),
         TAG, "new_panel_io_spi");
 
     ESP_LOGI(TAG, "GC9A01 panel: rst=%d bgr=%d invert=%d",
@@ -159,7 +159,7 @@ esp_err_t display_init(void)
                                           : LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_gc9a01(io, &panel_cfg, &s_panel),
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_gc9a01(s_io, &panel_cfg, &s_panel),
                         TAG, "new_panel_gc9a01");
 
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "panel_reset");
@@ -176,6 +176,16 @@ esp_err_t display_init(void)
 
     ESP_LOGI(TAG, "display ready (%dx%d)", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     return ESP_OK;
+}
+
+esp_lcd_panel_handle_t display_panel_handle(void)
+{
+    return s_panel;
+}
+
+esp_lcd_panel_io_handle_t display_io_handle(void)
+{
+    return s_io;
 }
 
 esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
