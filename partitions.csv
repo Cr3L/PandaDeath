@@ -1,0 +1,31 @@
+# Partition table for the 16 MB flash on the Knomi V1.
+#
+# Sized for OTA specifically because this board cannot be flashed conveniently:
+# the CH340 has no working auto-reset, so every wired update costs a manual
+# unplug / hold-BOOT / replug gesture. Two app slots make an over-the-air update
+# possible once Wi-Fi lands, which removes that gesture from the normal loop.
+#
+# Laid out before Wi-Fi rather than after, because changing the map once nvs and
+# otadata hold real data means erasing the chip — taking credentials with it.
+#
+# 4 MB per slot against a ~0.6 MB image today is roughly 7x headroom. That is
+# deliberate slack, not a guess: Wi-Fi, TLS and a couple of fonts are the known
+# additions, and a slot that has to grow later costs the erase this file exists
+# to avoid. The 8 MB it leaves over is more than any planned use, so it is
+# reserved as storage rather than trimmed.
+#
+# No factory partition. With valid OTA slots the bootloader falls back to ota_0,
+# and `idf.py flash` writes there, so the wired workflow is unchanged. A factory
+# partition would only add a third copy of the app that nothing ever selects.
+#
+# Offsets are explicit rather than blank so that this file reads the same as the
+# flash does. App partitions must start on a 64 kB boundary, which is why ota_0
+# begins at 0x20000 and not immediately after phy_init.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x400000,
+ota_1,      app,  ota_1,   0x420000, 0x400000,
+storage,    data, spiffs,  0x820000, 0x7e0000,

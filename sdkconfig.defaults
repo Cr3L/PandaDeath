@@ -3,6 +3,16 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
+# Two 4 MB OTA slots instead of the default single 1 MB app. See partitions.csv
+# for the layout and why OTA specifically is worth the space on this board.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# -Os, not IDF's default -Og. The LVGL software renderer's per-pixel work is
+# what sets frame time here, and the whole image is smaller for it. Debug builds
+# can still be had with menuconfig when a specific bug wants them.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
 # 1 kHz tick keeps vTaskDelay granularity at 1 ms. Nothing needs that yet — the
 # LVGL tick is 10 ms and the shortest delay in the tree is 30 ms — so this is
 # headroom, not a requirement, and it costs ~900 extra timer interrupts/s.
