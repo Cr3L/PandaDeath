@@ -33,6 +33,13 @@ static const char *TAG = "ui";
 #define COLOR_TRACK      0x1A2E22  /* arc groove, a dark cast of the accent */
 #define COLOR_SUBTITLE   0x7E9488
 
+/* Arc sweep. The value range is also what the centre label counts through, so
+ * the two cannot drift apart. ARC_STEP_MS is how long one integer value is held
+ * — 600 ms, a hundredth of a minute. */
+#define ARC_VALUE_MIN 0
+#define ARC_VALUE_MAX 100
+#define ARC_STEP_MS   600
+
 static lv_obj_t *s_arc;
 static lv_obj_t *s_value_label;
 
@@ -67,8 +74,8 @@ static void build_screen(void)
     lv_obj_center(s_arc);
     lv_arc_set_rotation(s_arc, 135);
     lv_arc_set_bg_angles(s_arc, 0, 270);
-    lv_arc_set_range(s_arc, 0, 100);
-    lv_arc_set_value(s_arc, 0);
+    lv_arc_set_range(s_arc, ARC_VALUE_MIN, ARC_VALUE_MAX);
+    lv_arc_set_value(s_arc, ARC_VALUE_MIN);
     lv_obj_remove_style(s_arc, NULL, LV_PART_KNOB);
     lv_obj_remove_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_arc_width(s_arc, 12, LV_PART_MAIN);
@@ -87,14 +94,20 @@ static void build_screen(void)
     lv_obj_set_style_text_color(title, lv_color_hex(COLOR_SUBTITLE), LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 25);
 
+    /* One step per 600 ms — a hundredth of a minute — so the centre value is
+     * readable as it changes rather than blurring past. The animation is
+     * specified by total duration, so that is the step time times the number of
+     * steps in the range, kept as that arithmetic instead of a bare 60000 to
+     * survive a change to either end of the range. */
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_arc);
     lv_anim_set_exec_cb(&a, arc_anim_cb);
-    lv_anim_set_duration(&a, 2500);
-    lv_anim_set_playback_duration(&a, 2500);
+    lv_anim_set_duration(&a, ARC_STEP_MS * (ARC_VALUE_MAX - ARC_VALUE_MIN));
+    lv_anim_set_playback_duration(&a,
+                                  ARC_STEP_MS * (ARC_VALUE_MAX - ARC_VALUE_MIN));
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_values(&a, 0, 100);
+    lv_anim_set_values(&a, ARC_VALUE_MIN, ARC_VALUE_MAX);
     lv_anim_start(&a);
 }
 
