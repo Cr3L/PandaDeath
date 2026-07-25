@@ -24,6 +24,12 @@ static const char *TAG = "ui";
  * Shared with display.h so the SPI bus transfer limit covers this buffer. */
 #define LVGL_BUFFER_ROWS DISPLAY_DRAW_ROWS
 
+/* Screen palette. Kept together so a retheme is one edit rather than a hunt
+ * through widget setup. */
+#define COLOR_ACCENT     0x00E676  /* arc indicator */
+#define COLOR_TRACK      0x1A2E22  /* arc groove, a dark cast of the accent */
+#define COLOR_SUBTITLE   0x7E9488
+
 static lv_obj_t *s_arc;
 static lv_obj_t *s_value_label;
 
@@ -54,8 +60,8 @@ static void build_screen(void)
     lv_obj_remove_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_arc_width(s_arc, 12, LV_PART_MAIN);
     lv_obj_set_style_arc_width(s_arc, 12, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(s_arc, lv_color_hex(0x203040), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(s_arc, lv_color_hex(0x00C8FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_arc, lv_color_hex(COLOR_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_arc, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
 
     s_value_label = lv_label_create(scr);
     lv_label_set_text(s_value_label, "0");
@@ -65,7 +71,7 @@ static void build_screen(void)
 
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, "PandaDeath");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x8090A0), LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(COLOR_SUBTITLE), LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 25);
 
     lv_anim_t a;
