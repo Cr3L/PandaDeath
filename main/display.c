@@ -225,14 +225,36 @@ esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
                         "not initialised");
 
     /* Clip to the panel. Callers doing animation are allowed to walk a shape
-     * off the edge; that should dim the shape, not fail the call. */
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > DISPLAY_WIDTH)  { w = DISPLAY_WIDTH - x; }
-    if (y + h > DISPLAY_HEIGHT) { h = DISPLAY_HEIGHT - y; }
-    if (w <= 0 || h <= 0) {
+     * off the edge; that should dim the shape, not fail the call.
+     *
+     * Written to never form `x + w` or `y + h`. Those overflow for large
+     * inputs, and the wrapped result compares as negative, so the clamp does
+     * not fire and an unbounded w reaches the buffer fill below as an
+     * arbitrary-length write into DMA memory. Not reachable from today's
+     * callers, which pass only constants, but the class disappears entirely by
+     * subtracting from the bound instead of adding to the origin.
+     *
+     * `w += x` below cannot overflow: w is already known positive and x
+     * negative, so the sum lies between them. */
+    if (w <= 0 || h <= 0 || x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT) {
         return ESP_OK;
     }
+    if (x < 0) {
+        w += x;
+        if (w <= 0) {
+            return ESP_OK;
+        }
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        if (h <= 0) {
+            return ESP_OK;
+        }
+        y = 0;
+    }
+    if (w > DISPLAY_WIDTH - x)  { w = DISPLAY_WIDTH - x; }
+    if (h > DISPLAY_HEIGHT - y) { h = DISPLAY_HEIGHT - y; }
 
     if (s_fill_buf == NULL) {
         /* DMA-capable memory is required: the SPI driver cannot transfer from
@@ -246,6 +268,12 @@ esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
 
     /* Only the first chunk's worth needs filling; every band re-sends it. */
     const size_t buf_px = (size_t)w * MIN(h, FILL_CHUNK_ROWS);
+
+    /* The clipping above already guarantees this. Checked anyway because the
+     * cost is one comparison and the failure mode it guards is a silent write
+     * past the end of a DMA buffer. */
+    ESP_RETURN_ON_FALSE(buf_px <= FILL_BUF_PX, ESP_ERR_INVALID_SIZE, TAG,
+                        "fill %dx%d exceeds buffer", w, h);
     const uint16_t swapped = RGB565_SWAP(color);
     for (size_t i = 0; i < buf_px; i++) {
         s_fill_buf[i] = swapped;

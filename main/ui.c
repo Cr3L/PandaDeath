@@ -122,7 +122,10 @@ esp_err_t ui_init(void)
 
     /* LVGL is not thread safe and now has its own task. Every call into it from
      * elsewhere, including this one, has to hold the port lock. */
-    if (!lvgl_port_lock(0)) {
+    /* A 0 timeout means wait forever in esp_lvgl_port, which would make the
+     * failure branch unreachable and hang boot on a stuck lock. Bounded
+     * instead: nothing else holds this yet, so a second is already generous. */
+    if (!lvgl_port_lock(1000)) {
         ESP_LOGE(TAG, "could not take lvgl lock");
         return ESP_ERR_TIMEOUT;
     }

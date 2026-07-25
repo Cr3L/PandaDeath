@@ -5,6 +5,11 @@ build/
 sdkconfig
 sdkconfig.old
 
-# Fetched by the IDF component manager, reproducible from idf_component.yml
+# Fetched vendor code, re-derivable from dependencies.lock
 managed_components/
-dependencies.lock
+
+# dependencies.lock is deliberately NOT ignored. idf_component.yml holds version
+# *ranges*, so it cannot pin a build on its own — the lock is the only record of
+# what was actually compiled, including a content hash per component. Without it
+# a clean clone re-resolves against the registry and can silently take different
+# versions, most notably lvgl, which esp_lvgl_port requests as >=8,<10.
