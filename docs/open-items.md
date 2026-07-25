@@ -36,7 +36,45 @@ than the first.
 that genuinely contains the files. Otherwise this closes on its own as each
 future change gets reviewed on the way in.
 
-## 2. "Don't mix drawing paths" is prose, not code
+## 2. Sprite pixels are committed as 2 MB of C text
+
+`main/zoo_sprites.c` is 2 MB of `0x00, ` ASCII holding 324 kB of actual pixels —
+a 6x expansion of the bytes and a 100x expansion of the 20 kB of PNGs they come
+from. Every regeneration rewrites all of it, so a one-pixel art tweak produces a
+multi-megabyte diff no review can read.
+
+The fix is not build-time generation: that would put Pillow in the path of every
+clean build, on a project whose CLAUDE.md already documents two Python
+environments as a live source of confusion. Committing the artifact is right.
+Committing it *as C text* is not — the generator should emit a packed binary
+blob plus a small descriptor table, pulled in with IDF's `EMBED_FILES`. Git then
+stores the pixels as pixels, and the reviewable part shrinks to a few dozen
+lines.
+
+**Why it waits:** the art is settled and the current form works, verified on
+hardware. Doing it now would mean rewriting the asset pipeline in the same
+breath as landing the feature, and the feature is the thing that was tested.
+
+**Trigger:** the first art change. That is when the unreadable diff stops being
+theoretical. Fold in the removal of `zoo_animal_t` at the same time — the struct
+exists to serve one log line and the blob rework replaces its layout anyway.
+
+## 3. Nothing can tear a screen down
+
+`ui_zoo_screen_build()` creates an `lv_timer` and builds objects on
+`lv_screen_active()`; neither can be released. With compile-time `BOOT_MODE`
+selection exactly one screen is ever built and never destroyed, so this costs
+nothing today.
+
+**Why it waits:** a `screen_t { build, destroy }` interface with two screens,
+one of which is never dispatched on, is indirection that nothing uses. Screen
+count is not the trigger — three more `void f(void)` builders cost nothing.
+
+**Trigger:** the first time two screens must coexist or swap at runtime. That is
+when `destroy` acquires a job, and the interface can be extracted then from two
+concrete examples rather than guessed at now from none.
+
+## 4. "Don't mix drawing paths" is prose, not code
 
 Nothing stops a caller using `display_fill*` after LVGL owns the panel.
 `fill_buf_wait_idle()` does not help: it protects the fill buffer from the
@@ -47,7 +85,7 @@ depends on what the second drawing path turns out to be.
 
 **Trigger:** the first time something draws a splash before LVGL starts.
 
-## 3. PSRAM disabled
+## 5. PSRAM disabled
 
 8 MB unused.
 
@@ -60,14 +98,14 @@ DRAM for the mapping.
 read-modify-write and WROVER PSRAM is roughly 10x slower, which would push
 render time past flush time.
 
-## 4. Stack smashing protection off
+## 6. Stack smashing protection off
 
 **Why it waits:** it costs a little size and speed, and catches a bug class the
 current code cannot produce — there is no parser here.
 
 **Trigger:** the day an HTTP or JSON parser lands.
 
-## 5. The initial black clear paints an invisible frame
+## 7. The initial black clear paints an invisible frame
 
 `display_init()` clears to black while the backlight is still at zero, costing
 ~23 ms and 115 kB of SPI at boot. It is also the only reason the 9.6 kB DMA
@@ -78,7 +116,7 @@ insurance against showing power-up noise if the fade ever moves earlier.
 
 **Trigger:** if boot latency ever matters, this is 23 ms sitting in plain sight.
 
-## 6. `CONFIG_FREERTOS_HZ=1000`
+## 8. `CONFIG_FREERTOS_HZ=1000`
 
 Buys 1 ms scheduling granularity that nothing currently needs — the LVGL tick is
 10 ms and the shortest delay in the tree is 30 ms. Costs ~900 timer interrupts a
@@ -89,7 +127,7 @@ later does want fine delays.
 
 **Trigger:** if the tick ISR shows up competing with Wi-Fi.
 
-## 7. Only one of `display_init()`'s six failure exits has executed
+## 9. Only one of `display_init()`'s six failure exits has executed
 
 The unwind was verified by injecting a failure at the last and most
 resource-heavy point, confirming on hardware that a second `display_init()`
