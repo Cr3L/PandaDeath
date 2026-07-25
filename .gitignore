@@ -1,0 +1,10 @@
+# ESP-IDF build output
+build/
+
+# Per-machine generated config (sdkconfig.defaults is committed instead)
+sdkconfig
+sdkconfig.old
+
+# Fetched by the IDF component manager, reproducible from idf_component.yml
+managed_components/
+dependencies.lock
