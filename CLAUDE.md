@@ -22,6 +22,14 @@ and they are different:
 Always ask Michael to perform the gesture and wait for confirmation before
 running `idf.py flash`. Never assume auto-reset works — it does not.
 
+**`erase-flash` needs its own gesture.** It is tempting to reason that since the
+closing "hard reset via RTS" does nothing on this board, the chip stays in
+download mode and an erase can be chained straight into a flash on one gesture.
+It cannot: the erase leaves the chip out of download mode, and the flash that
+follows fails to connect. Budget two gestures, and note the window between them
+is the one moment the board has no firmware at all — dark screen and silent
+serial there is the erase having worked, not a brick.
+
 Holding BOOT during what was meant to be a plain replug leaves the board in
 download mode: **screen completely dark and serial completely silent.** That
 combination reads like a crash but is not. Confirm with:
@@ -117,44 +125,34 @@ Deferred deliberately, with reasons — not forgotten:
    are. The bug it would have been aimed at (see the DMA drain in
    `display_fill_rect`) was found by reading, and sat outside that diff. A run
    scoped to the whole tree is still the highest-value gap.
-2. **Partition table** — 1 MB app partition on a 16 MB chip, ~45% free. Worth
-   fixing *before* Wi-Fi + TLS, since changing it later means a full erase.
-   Note `sdkconfig` also sets `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=
-   "partitions.csv"` while `SINGLE_APP` is selected, so that setting is inert
-   and no such file exists — it reads as though a custom table is already in
-   play. Clear that up in the same pass.
-3. **No unwind on `display_init()` failure** — `s_panel` stays non-NULL, the
+2. **No unwind on `display_init()` failure** — `s_panel` stays non-NULL, the
    module wedges, SPI bus and panel objects leak. Unreachable today because
    `ESP_ERROR_CHECK` aborts first. Wants a `fail:` label and a separate
    `s_ready` flag as the guard. The drain added before the fill-buffer free is
    one more early return on that path, and leaves `s_fill_buf` allocated as
    well, so the label now has more to clean up than when this was written.
-4. **"Don't mix drawing paths" is prose, not code.** Nothing stops a caller
+3. **"Don't mix drawing paths" is prose, not code.** Nothing stops a caller
    using `display_fill*` after LVGL owns the panel. Becomes real the first time
    something draws a splash before LVGL starts. `fill_buf_wait_idle()` does not
    help here: it protects the fill buffer from the previous *fill*, not from
    LVGL.
-5. **PSRAM disabled** — 8 MB unused. Enable when there is something cold to put
+4. **PSRAM disabled** — 8 MB unused. Enable when there is something cold to put
    there. Do *not* move LVGL draw buffers into it; the software renderer does
    per-pixel read-modify-write and PSRAM is ~10× slower.
-6. **Stack smashing protection off** — turn on the day an HTTP or JSON parser
+5. **Stack smashing protection off** — turn on the day an HTTP or JSON parser
    lands. That is the bug class it catches.
-7. **Author email is a personal gmail** in all commit history. Irrelevant while
-   the repo is private, permanent if it ever goes public. Rewritable only while
-   commits are unpushed, so this decides itself by default if left alone.
-8. **Build inherits `-Og`** (IDF's default), never `-Os`. Likely the largest
-   single win available on both image size and LVGL render time, since the
-   software renderer's per-pixel work is what sets frame time. Needs deleting
-   `sdkconfig` so new defaults take, so it batches with item 2.
-9. **The initial black clear in `display_init()`** costs ~23 ms and 115 kB of
+6. **The initial black clear in `display_init()`** costs ~23 ms and 115 kB of
    SPI at boot, painting a frame nobody sees under a backlight still at zero.
    It is also the only reason the 9.6 kB DMA buffer is allocated during init at
    all. Kept deliberately as defence for a future splash path; recorded here so
    it is a decision rather than an oversight.
-10. **`CONFIG_FREERTOS_HZ=1000`** buys 1 ms granularity that nothing currently
+7. **`CONFIG_FREERTOS_HZ=1000`** buys 1 ms granularity that nothing currently
    needs — the LVGL tick is 10 ms and the shortest delay in the tree is 30 ms.
    The comment claiming the display wants it has been corrected; the value
    itself is still an open question, worth ~900 timer interrupts/s.
+
+Closed: the partition table now carries two 4 MB OTA slots, the build uses
+`-Os`, and every commit's author address is the GitHub noreply one.
 
 ## Not yet decided
 
