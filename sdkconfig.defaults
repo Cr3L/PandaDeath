@@ -8,3 +8,9 @@ CONFIG_FREERTOS_HZ=1000
 
 # LVGL ships only Montserrat 14 by default; the UI uses 28 for the centre value.
 CONFIG_LV_FONT_MONTSERRAT_28=y
+
+# LVGL's builtin allocator reserves this much DRAM in .bss unconditionally, at
+# link time, whether or not anything uses it. The default 64 kB was the single
+# largest DRAM consumer in the image and would collide with Wi-Fi later; the
+# current UI needs well under 16 kB.
+CONFIG_LV_MEM_SIZE_KILOBYTES=16

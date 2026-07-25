@@ -5,14 +5,15 @@ it. This reopens the port as it reappears, so a capture can be started before
 the replug and still record the boot log that follows it.
 """
 
-import os
 import sys
 import time
+from contextlib import suppress
 
 import serial
 
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
+RETRY_DELAY = 0.3
 DURATION = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
 
 deadline = time.time() + DURATION
@@ -21,24 +22,25 @@ ser = None
 
 while time.time() < deadline:
     if ser is None:
-        if not os.path.exists(PORT):
-            time.sleep(0.2)
-            continue
         try:
-            ser = serial.Serial()
-            ser.port = PORT
-            ser.baudrate = BAUD
-            ser.timeout = 0.3
+            port = serial.Serial()
+            port.port = PORT
+            port.baudrate = BAUD
+            port.timeout = RETRY_DELAY
             # Leave the handshake lines alone: this board does not wire them to
             # EN/GPIO0, and driving them has no useful effect here.
-            ser.dtr = False
-            ser.rts = False
-            ser.open()
-            out.append(b"\n--- port opened ---\n")
+            port.dtr = False
+            port.rts = False
+            port.open()
         except Exception:
-            ser = None
-            time.sleep(0.3)
+            # Covers the device being absent as well as failing to open, so the
+            # missing-path case needs no separate check.
+            time.sleep(RETRY_DELAY)
             continue
+        # Published only once fully open, so "ser is not None" always means a
+        # readable port rather than a half-built one.
+        ser = port
+        out.append(b"\n--- port opened ---\n")
 
     try:
         chunk = ser.read(512)
@@ -46,18 +48,14 @@ while time.time() < deadline:
             out.append(chunk)
     except Exception as exc:
         out.append(f"\n--- port lost: {exc} ---\n".encode())
-        try:
+        with suppress(Exception):
             ser.close()
-        except Exception:
-            pass
         ser = None
-        time.sleep(0.3)
+        time.sleep(RETRY_DELAY)
 
 if ser is not None:
-    try:
+    with suppress(Exception):
         ser.close()
-    except Exception:
-        pass
 
 data = b"".join(out)
 sys.stdout.write(f"bytes captured: {len(data)}\n")

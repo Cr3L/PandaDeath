@@ -9,9 +9,20 @@ static const char *TAG = "ui";
 
 /* Rows held in each draw buffer. LVGL renders a slice at a time and flushes it,
  * so this trades RAM against the number of SPI transactions per frame; it does
- * not have to cover the screen. A full 240x240 frame would be 115 kB, which is
- * a lot to reserve on a board whose DRAM is already shared with Wi-Fi later. */
-#define LVGL_BUFFER_ROWS 40
+ * not have to cover the screen.
+ *
+ * 20 rows double-buffered is 9.6 kB each, 19.2 kB total, of DMA-capable
+ * internal DRAM. Doubling to 40 rows halves the flush count for a full-screen
+ * refresh (12 -> 6) but each extra flush costs only tens of microseconds
+ * against ~23 ms of SPI wire time, so it buys under 1% for another 19 kB —
+ * a bad trade on a board that still has to fit Wi-Fi.
+ *
+ * These stay in internal DRAM even once PSRAM is enabled: LVGL's software
+ * renderer does per-pixel read-modify-write here, and WROVER PSRAM is roughly
+ * an order of magnitude slower, which would push render time past flush time.
+ *
+ * Shared with display.h so the SPI bus transfer limit covers this buffer. */
+#define LVGL_BUFFER_ROWS DISPLAY_DRAW_ROWS
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_value_label;
@@ -73,7 +84,12 @@ esp_err_t ui_init(void)
     ESP_RETURN_ON_FALSE(display_panel_handle() != NULL, ESP_ERR_INVALID_STATE,
                         TAG, "display not initialised");
 
-    const lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    /* The default 5 ms tick wakes the LVGL task 200x/s, but LV_DEF_REFR_PERIOD
+     * caps output at ~30 fps, so most of those wakeups walk the timer list and
+     * go straight back to blocked. Animations interpolate on elapsed
+     * milliseconds, not tick count, so a coarser tick costs no smoothness. */
+    port_cfg.timer_period_ms = 10;
     ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
 
     const lvgl_port_display_cfg_t disp_cfg = {
@@ -85,13 +101,13 @@ esp_err_t ui_init(void)
         .vres         = DISPLAY_HEIGHT,
         .monochrome   = false,
         .color_format = LV_COLOR_FORMAT_RGB565,
-        /* The panel's native scan order is a reflection, not a rotation, so a
-         * single axis is mirrored here. Mirroring both instead yields a 180
-         * degree rotation, which leaves text upright but reversed. */
+        /* Same constants display_init() applies. esp_lvgl_port mirrors the
+         * panel itself when it attaches, so leaving these zeroed would silently
+         * undo the driver's orientation rather than inherit it. */
         .rotation = {
             .swap_xy  = false,
-            .mirror_x = false,
-            .mirror_y = true,
+            .mirror_x = PANEL_MIRROR_X,
+            .mirror_y = PANEL_MIRROR_Y,
         },
         .flags = {
             .buff_dma   = true,

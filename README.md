@@ -9,8 +9,9 @@ foundation to build on.
 
 ## Status
 
-Display bring-up is complete and verified on hardware: colour, geometry and
-refresh all confirmed. LVGL is the intended next layer.
+Display bring-up is complete and verified on hardware: colour, geometry,
+orientation and refresh all confirmed. LVGL 9 runs on top of it via
+`esp_lvgl_port`, currently showing a placeholder arc and labels.
 
 ## Hardware
 
@@ -118,21 +119,32 @@ Two settings could not be resolved by reading code and are isolated at the top o
 headroom, but a marginal signal shows up as sparkle or a dead panel rather than a
 clean error.
 
-**Orientation** is set in [`main/ui.c`](main/ui.c) via `mirror_y`. The panel's
-native scan order is a *reflection*, not a rotation — so it needs an odd number
-of axis flips to correct. Mirroring both axes looks like an obvious fix and is
-wrong: that is a 180° rotation, which leaves text upright but reading backwards,
-as if seen from behind the screen.
+**Orientation** is `PANEL_MIRROR_X` / `PANEL_MIRROR_Y` in
+[`main/display.h`](main/display.h). The panel's native scan order is a
+*reflection*, not a rotation — so it needs an odd number of axis flips to
+correct. Mirroring both axes looks like an obvious fix and is wrong: that is a
+180° rotation, which leaves text upright but reading backwards, as if seen from
+behind the screen.
+
+These constants are public rather than private to `display.c` because two things
+apply them and they must agree. `display_init()` mirrors the panel so the
+LVGL-free self-test is oriented correctly, and `esp_lvgl_port` mirrors it again
+from its own rotation config when LVGL attaches. Zeroing the latter does *not*
+mean "inherit" — it actively mirrors nothing and silently undoes the driver.
 
 ## Verifying changes on hardware
 
-`app_main` runs three tests in order: a colour walk, a **static** geometry frame
-held 20 s, then a motion loop.
+Set `RUN_HARDWARE_SELFTEST` to `1` in [`main/main.c`](main/main.c) to run the raw
+panel exercise instead of the UI: a colour walk, a **static** geometry frame held
+20 s, then a motion loop. It talks straight to the panel with no LVGL involved,
+which is the fastest way to tell a wiring or panel-config fault from a graphics
+fault — and it is how a second board should be brought up.
 
 The static frame exists because photographing a *moving* pattern is misleading —
 phone rolling shutter smears a travelling shape along its axis of motion, which
 looks exactly like the shape being the wrong size. Judge geometry only from the
-static frame.
+static frame. Note it is symmetric about both axes, so it cannot catch a
+mirroring fault; add an asymmetric element if that is what you are chasing.
 
 Cameras also blow out bright colours against a dark background (green reads
 white, red reads yellow) and LCD black leaks blue at full backlight, so **colour
@@ -142,11 +154,18 @@ correctness is an eyeball judgement, not a photo judgement.**
 
 ```
 main/
-  display.c/h    GC9A01 driver: SPI bus, panel, backlight PWM, rect fills
-  main.c         hardware test sequence
+  display.c/h    GC9A01 driver: SPI bus, panel, backlight PWM/fade, rect fills
+  ui.c/h         LVGL setup and screen construction
+  selftest.c/h   raw panel exercise, bypasses LVGL entirely
+  main.c         boot path: display -> UI -> fade up
 tools/
   capture.py     serial capture that survives a USB replug
 ```
+
+`ui.c` touches no pin, clock or panel command — it depends on `display.h` only
+for the panel dimensions and handles. That seam is what should carry to a second
+board; the screen *layout* in `ui.c` will not, since the arc and offsets are
+tuned for a 240×240 round panel.
 
 Built on ESP-IDF's native `esp_lcd` stack rather than Arduino/TFT_eSPI, so the
 concepts carry over to other ESP32 boards. Only the pin numbers came from BTT.
