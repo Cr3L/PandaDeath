@@ -62,7 +62,10 @@ static const char *TAG = "display";
 #define BL_LEDC_MODE     LEDC_LOW_SPEED_MODE
 #define BL_LEDC_RES      LEDC_TIMER_10_BIT
 #define BL_LEDC_FREQ_HZ  5000
-#define BL_DUTY_MAX      ((1 << 10) - 1)
+/* Not (1 << 10) - 1. LEDC documents the duty range as [0, 2**resolution]
+ * inclusive, and full-on is the endpoint: at 1023 the output still drops for one
+ * clock of every 1024, so "100%" would never quite be 100%. */
+#define BL_DUTY_MAX      (1 << 10)
 
 static esp_lcd_panel_handle_t s_panel;
 static esp_lcd_panel_io_handle_t s_io;
@@ -164,9 +167,10 @@ esp_err_t display_init(void)
     ESP_LOGI(TAG, "SPI bus: mosi=%d sclk=%d @ %d MHz",
              PIN_MOSI, PIN_SCLK, LCD_PIXEL_CLOCK_HZ / 1000000);
 
-    /* Must cover the largest single transfer any consumer will push, which is
-     * LVGL's draw buffer, not this module's fill chunks — LVGL's is the larger
-     * of the two and sizing to the fill buffer would silently truncate it. */
+    /* Sized so one draw buffer is one transaction. Both consumers — this
+     * module's fill chunks and LVGL's draw buffers — are DISPLAY_DRAW_BUF_PX by
+     * construction, so a single limit covers both. Undersizing it would cost
+     * extra transactions rather than lose pixels; see display.h. */
     const spi_bus_config_t bus =
         GC9A01_PANEL_BUS_SPI_CONFIG(PIN_SCLK, PIN_MOSI, DISPLAY_MAX_TRANSFER_SZ);
     ESP_GOTO_ON_ERROR(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO),
@@ -282,14 +286,24 @@ fail:
     return ret;
 }
 
+bool display_ready(void)
+{
+    return s_ready;
+}
+
+/* Both accessors gate on s_ready rather than returning the raw pointer, so the
+ * handle is NULL for exactly as long as it is unsafe to draw through. Handing
+ * out a panel that merely exists would make every future consumer's safety
+ * depend on remembering to call display_ready() first — a rule that holds only
+ * until someone doesn't. */
 esp_lcd_panel_handle_t display_panel_handle(void)
 {
-    return s_panel;
+    return s_ready ? s_panel : NULL;
 }
 
 esp_lcd_panel_io_handle_t display_io_handle(void)
 {
-    return s_io;
+    return s_ready ? s_io : NULL;
 }
 
 esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)

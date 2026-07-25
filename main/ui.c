@@ -113,7 +113,13 @@ static void build_screen(void)
 
 esp_err_t ui_init(void)
 {
-    ESP_RETURN_ON_FALSE(display_panel_handle() != NULL, ESP_ERR_INVALID_STATE,
+    /* Asks the display whether it is usable rather than inferring it from a
+     * non-NULL panel handle: the handle exists from the moment the object is
+     * constructed, which is several failable steps before the panel is
+     * configured. Equivalent today only because display_init()'s unwind nulls
+     * the handle on every failure path — an invariant this has no business
+     * depending on. */
+    ESP_RETURN_ON_FALSE(display_ready(), ESP_ERR_INVALID_STATE,
                         TAG, "display not initialised");
 
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
