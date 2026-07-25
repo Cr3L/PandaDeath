@@ -76,6 +76,25 @@ static esp_lcd_panel_io_handle_t s_io;
  * pool Wi-Fi draws from. Not re-entrant: fills are expected from a single task. */
 static uint16_t *s_fill_buf;
 
+/* Blocks until nothing the panel IO has queued is still reading s_fill_buf.
+ *
+ * esp_lcd_panel_draw_bitmap does not wait for the wire: it hands the pixels to
+ * spi_device_queue_trans and returns with the last chunk still in flight. The
+ * driver only reclaims those descriptors when the next *command* goes out, so
+ * within one fill each chunk's CASET drains the chunk before it and reuse is
+ * safe. Between fills it is not — display_fill_rect rewrites the buffer before
+ * issuing any command, so without this the new colour can overwrite bytes the
+ * previous fill's tail is still transmitting, painting a band of the wrong
+ * colour at the end of a shape.
+ *
+ * A -1 command is the documented "no command needed" form. It is used here for
+ * its side effect only: tx_param drains the queue before it inspects lcd_cmd,
+ * so this reclaims every descriptor and puts nothing on the wire. */
+static esp_err_t fill_buf_wait_idle(void)
+{
+    return esp_lcd_panel_io_tx_param(s_io, -1, NULL, 0);
+}
+
 static esp_err_t backlight_init(void)
 {
     const ledc_timer_config_t timer = {
@@ -191,7 +210,14 @@ esp_err_t display_init(void)
     /* In the normal build that clear is the only fill there will ever be —
      * LVGL takes the panel from here and brings its own buffers. Hand the DMA
      * memory back rather than holding 9.6 kB for the life of the process; the
-     * self-test path reallocates it on its next fill. */
+     * self-test path reallocates it on its next fill.
+     *
+     * Drain first: freeing a buffer the SPI driver is still transmitting from
+     * is a use-after-free that the disp_on_off above happens to prevent today,
+     * purely because sending a command reclaims queued descriptors. Relying on
+     * that means these two lines cannot be reordered without silent corruption,
+     * so state the dependency instead of resting on it. */
+    ESP_RETURN_ON_ERROR(fill_buf_wait_idle(), TAG, "drain before free");
     heap_caps_free(s_fill_buf);
     s_fill_buf = NULL;
 
@@ -256,6 +282,11 @@ esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
                                       MALLOC_CAP_DMA);
         ESP_RETURN_ON_FALSE(s_fill_buf != NULL, ESP_ERR_NO_MEM, TAG,
                             "fill buffer (%d px)", DISPLAY_DRAW_BUF_PX);
+    } else {
+        /* Buffer survives from an earlier fill, so an earlier fill's tail may
+         * still be reading it. Nothing to wait for on the freshly allocated
+         * path. */
+        ESP_RETURN_ON_ERROR(fill_buf_wait_idle(), TAG, "drain before refill");
     }
 
     /* Only the first chunk's worth needs filling; every band re-sends it. */
