@@ -65,6 +65,13 @@ static const char *TAG = "display";
 
 static esp_lcd_panel_handle_t s_panel;
 
+/* Scratch buffer for fills, allocated once. Sized for the widest possible
+ * chunk, so any rectangle up to full width reuses it. Allocating per call
+ * instead would put a malloc/free pair inside every frame of an animation.
+ * Not re-entrant: fills are expected from a single task. */
+static uint16_t *s_fill_buf;
+#define FILL_BUF_PX (DISPLAY_WIDTH * FILL_CHUNK_ROWS)
+
 static esp_err_t backlight_init(void)
 {
     const ledc_timer_config_t timer = {
@@ -105,6 +112,13 @@ esp_err_t display_init(void)
 {
     ESP_RETURN_ON_FALSE(s_panel == NULL, ESP_ERR_INVALID_STATE, TAG,
                         "already initialised");
+
+    /* DMA-capable memory is required: the SPI driver cannot transfer from the
+     * stack, and on PSRAM-equipped modules the general heap may not be DMA
+     * reachable. */
+    s_fill_buf = heap_caps_malloc(FILL_BUF_PX * sizeof(uint16_t), MALLOC_CAP_DMA);
+    ESP_RETURN_ON_FALSE(s_fill_buf != NULL, ESP_ERR_NO_MEM, TAG,
+                        "fill buffer (%d px)", FILL_BUF_PX);
 
     ESP_LOGI(TAG, "SPI bus: mosi=%d sclk=%d @ %d MHz",
              PIN_MOSI, PIN_SCLK, LCD_PIXEL_CLOCK_HZ / 1000000);
@@ -182,29 +196,23 @@ esp_err_t display_fill_rect(int x, int y, int w, int h, uint16_t color)
     const int chunk_rows = (h < FILL_CHUNK_ROWS) ? h : FILL_CHUNK_ROWS;
     const size_t buf_px = (size_t)w * chunk_rows;
 
-    /* DMA-capable memory is required; the SPI driver cannot transfer from the
-     * stack or from PSRAM-backed heap. */
-    uint16_t *buf = heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_DMA);
-    ESP_RETURN_ON_FALSE(buf != NULL, ESP_ERR_NO_MEM, TAG,
-                        "fill buffer (%u px)", (unsigned)buf_px);
-
     const uint16_t swapped = RGB565_SWAP(color);
     for (size_t i = 0; i < buf_px; i++) {
-        buf[i] = swapped;
+        s_fill_buf[i] = swapped;
     }
 
-    esp_err_t err = ESP_OK;
     for (int row = y; row < y + h; row += chunk_rows) {
         const int rows = ((y + h) - row < chunk_rows) ? (y + h) - row : chunk_rows;
-        err = esp_lcd_panel_draw_bitmap(s_panel, x, row, x + w, row + rows, buf);
+        const esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, x, row,
+                                                       x + w, row + rows,
+                                                       s_fill_buf);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "draw_bitmap at row %d: %s", row, esp_err_to_name(err));
-            break;
+            return err;
         }
     }
 
-    free(buf);
-    return err;
+    return ESP_OK;
 }
 
 esp_err_t display_fill(uint16_t color)

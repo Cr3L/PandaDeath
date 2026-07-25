@@ -7,6 +7,19 @@
 
 static const char *TAG = "main";
 
+/* Abandon the current test on a draw failure, but leave the device running.
+ * ESP_ERROR_CHECK would panic and reboot, which on a board that needs a manual
+ * BOOT sequence to reflash turns a one-off glitch into a power-cycle. The error
+ * still reaches the log either way. */
+#define TRY(expr)                                                        \
+    do {                                                                 \
+        const esp_err_t _err = (expr);                                   \
+        if (_err != ESP_OK) {                                            \
+            ESP_LOGE(TAG, "%s: %s", #expr, esp_err_to_name(_err));       \
+            return;                                                      \
+        }                                                                \
+    } while (0)
+
 /* Each colour is announced over serial before it is drawn, so the log and the
  * panel can be compared frame by frame. If the log says RED and the screen is
  * blue, the fault is colour order; if the screen stays dark throughout, the
@@ -27,7 +40,7 @@ static void run_color_test(void)
         ESP_LOGI(TAG, "colour test %u/%u: %s",
                  (unsigned)(i + 1), (unsigned)(sizeof(steps) / sizeof(steps[0])),
                  steps[i].name);
-        ESP_ERROR_CHECK(display_fill(steps[i].color));
+        TRY(display_fill(steps[i].color));
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
@@ -55,27 +68,23 @@ static void run_geometry_test(void)
     ESP_LOGI(TAG, "geometry test: crosshair + %dx%d square, holding 20 s",
              square, square);
 
-    ESP_ERROR_CHECK(display_fill(COLOR_BLACK));
+    TRY(display_fill(COLOR_BLACK));
 
     /* Crosshair: spans the full panel, so the arms are clipped by the round
      * bezel symmetrically if and only if the centre is correct. */
-    ESP_ERROR_CHECK(display_fill_rect(0, cy - 1, DISPLAY_WIDTH, 2, COLOR_WHITE));
-    ESP_ERROR_CHECK(display_fill_rect(cx - 1, 0, 2, DISPLAY_HEIGHT, COLOR_WHITE));
+    TRY(display_fill_rect(0, cy - 1, DISPLAY_WIDTH, 2, COLOR_WHITE));
+    TRY(display_fill_rect(cx - 1, 0, 2, DISPLAY_HEIGHT, COLOR_WHITE));
 
-    ESP_ERROR_CHECK(display_fill_rect(cx - square / 2, cy - square / 2,
-                                      square, square, COLOR_GREEN));
+    TRY(display_fill_rect(cx - square / 2, cy - square / 2,
+                          square, square, COLOR_GREEN));
 
     /* Cardinal markers. Equal distances confirm no axis is being scaled. */
-    ESP_ERROR_CHECK(display_fill_rect(cx - marker / 2, inset,
-                                      marker, marker, COLOR_RED));
-    ESP_ERROR_CHECK(display_fill_rect(cx - marker / 2,
-                                      DISPLAY_HEIGHT - inset - marker,
-                                      marker, marker, COLOR_RED));
-    ESP_ERROR_CHECK(display_fill_rect(inset, cy - marker / 2,
-                                      marker, marker, COLOR_RED));
-    ESP_ERROR_CHECK(display_fill_rect(DISPLAY_WIDTH - inset - marker,
-                                      cy - marker / 2,
-                                      marker, marker, COLOR_RED));
+    TRY(display_fill_rect(cx - marker / 2, inset, marker, marker, COLOR_RED));
+    TRY(display_fill_rect(cx - marker / 2, DISPLAY_HEIGHT - inset - marker,
+                          marker, marker, COLOR_RED));
+    TRY(display_fill_rect(inset, cy - marker / 2, marker, marker, COLOR_RED));
+    TRY(display_fill_rect(DISPLAY_WIDTH - inset - marker, cy - marker / 2,
+                          marker, marker, COLOR_RED));
 
     vTaskDelay(pdMS_TO_TICKS(20000));
 }
@@ -91,12 +100,12 @@ static void run_motion_test(void)
     int       step = 4;
 
     ESP_LOGI(TAG, "motion test: square sweeping vertically");
-    ESP_ERROR_CHECK(display_fill(COLOR_BLACK));
+    TRY(display_fill(COLOR_BLACK));
 
     while (true) {
-        ESP_ERROR_CHECK(display_fill_rect(x, y, size, size, COLOR_GREEN));
+        TRY(display_fill_rect(x, y, size, size, COLOR_GREEN));
         vTaskDelay(pdMS_TO_TICKS(30));
-        ESP_ERROR_CHECK(display_fill_rect(x, y, size, size, COLOR_BLACK));
+        TRY(display_fill_rect(x, y, size, size, COLOR_BLACK));
 
         y += step;
         if (y <= 0 || y + size >= DISPLAY_HEIGHT) {
@@ -110,6 +119,8 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "PandaDeath starting: GC9A01 bring-up on Knomi V1");
 
+    /* Init failure stays fatal: there is no useful fallback for a device whose
+     * only output is the screen. */
     ESP_ERROR_CHECK(display_init());
 
     /* Ramp rather than snap on, purely so a working backlight is obvious even
@@ -123,4 +134,9 @@ void app_main(void)
     run_color_test();
     run_geometry_test();
     run_motion_test();
+
+    ESP_LOGW(TAG, "all tests ended; idling");
+    while (true) {
+        vTaskDelay(portMAX_DELAY);
+    }
 }
