@@ -19,6 +19,17 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # Revisit at 100 Hz if the tick ISR ever shows up competing with Wi-Fi.
 CONFIG_FREERTOS_HZ=1000
 
+# The bootloader gets 0x7000 — it starts at 0x1000 and the partition table is
+# pinned at 0x8000 — and at INFO it was using all but 2.4 kB of that. Nothing
+# needs it: the bootloader's INFO lines describe a load sequence that is
+# identical every boot, and a failure still reports at WARN. Buys back a few kB
+# of format strings against the day secure boot or flash encryption lands, both
+# of which grow the bootloader and neither of which fails legibly when it
+# overflows. Moving the partition table instead would work and was rejected:
+# that offset is baked into every board already flashed, and shifting it means
+# erasing nvs — the thing partitions.csv exists to avoid.
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
 # LVGL ships only Montserrat 14 by default; the UI uses 28 for the centre value.
 CONFIG_LV_FONT_MONTSERRAT_28=y
 

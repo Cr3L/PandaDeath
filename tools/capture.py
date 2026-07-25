@@ -3,6 +3,12 @@
 Unplugging the board destroys /dev/ttyUSB0, which kills any handle held across
 it. This reopens the port as it reappears, so a capture can be started before
 the replug and still record the boot log that follows it.
+
+Output streams as it arrives rather than accumulating. That matters more than it
+sounds: a capture that buffers to the end is indistinguishable from one that
+died on the first read, and both look like a board that printed nothing — which
+is the same symptom as the crash such a capture is usually chasing. Piping this
+through `tail` reintroduces the problem at the shell instead, so don't.
 """
 
 import sys
@@ -17,8 +23,21 @@ RETRY_DELAY = 0.3
 DURATION = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
 
 deadline = time.time() + DURATION
-out = []
+total = 0
 ser = None
+
+
+def emit(data: bytes) -> None:
+    """Write straight through to stdout, unbuffered.
+
+    Bytes rather than text: a read can split a UTF-8 sequence across chunks, and
+    decoding each chunk on its own would turn a clean log line into replacement
+    characters at the boundary. The terminal reassembles them.
+    """
+    global total
+    total += len(data)
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
 
 while time.time() < deadline:
     if ser is None:
@@ -40,14 +59,14 @@ while time.time() < deadline:
         # Published only once fully open, so "ser is not None" always means a
         # readable port rather than a half-built one.
         ser = port
-        out.append(b"\n--- port opened ---\n")
+        emit(b"\n--- port opened ---\n")
 
     try:
         chunk = ser.read(512)
         if chunk:
-            out.append(chunk)
+            emit(chunk)
     except Exception as exc:
-        out.append(f"\n--- port lost: {exc} ---\n".encode())
+        emit(f"\n--- port lost: {exc} ---\n".encode())
         with suppress(Exception):
             ser.close()
         ser = None
@@ -57,6 +76,5 @@ if ser is not None:
     with suppress(Exception):
         ser.close()
 
-data = b"".join(out)
-sys.stdout.write(f"bytes captured: {len(data)}\n")
-sys.stdout.write(data.decode(errors="replace"))
+# Trails the log rather than leading it, since the log is now already out.
+sys.stdout.write(f"\n--- bytes captured: {total} ---\n")

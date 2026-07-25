@@ -74,10 +74,11 @@ It imports pyserial, which exists **only in the IDF virtualenv** — a bare
 ~/.espressif/python_env/idf5.5_py3.14_env/bin/python tools/capture.py 60
 ```
 
-Start it *before* asking for the replug, and do not pipe it through `tail` —
-that buffers until the process exits, so a capture that is working looks
-identical to one that is dead. Note also the app logs only during its first
-seconds, so a capture started later records nothing — that is not a fault.
+Start it *before* asking for the replug. It streams as it reads, so a live
+capture is visibly alive; do not pipe it through `tail`, which buffers until the
+process exits and makes a working capture look identical to a dead one. Note
+also the app logs only during its first seconds, so a capture started later
+records nothing — that is not a fault.
 
 **Never diagnose geometry from a photo or video of a moving pattern.** Phone
 rolling shutter smears a travelling shape along its axis of motion, which is
