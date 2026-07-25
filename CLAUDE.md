@@ -55,9 +55,21 @@ panel setting — compiled cleanly, reviewed cleanly, and were only caught on th
 device.
 
 Serial: `idf.py monitor` needs a TTY, so it must be run by Michael, not by an
-agent. For scripted capture use `python3 tools/capture.py 60`, which reopens the
-port across a replug. Note the app logs only during its first seconds, so a
-capture started later records nothing — that is not a fault.
+agent. For scripted capture use `tools/capture.py 60`, which reopens the port
+across a replug.
+
+It imports pyserial, which exists **only in the IDF virtualenv** — a bare
+`python3 tools/capture.py` dies on `ModuleNotFoundError: No module named
+'serial'`. Either source `export.sh` first, or call the interpreter directly:
+
+```sh
+~/.espressif/python_env/idf5.5_py3.14_env/bin/python tools/capture.py 60
+```
+
+Start it *before* asking for the replug, and do not pipe it through `tail` —
+that buffers until the process exits, so a capture that is working looks
+identical to one that is dead. Note also the app logs only during its first
+seconds, so a capture started later records nothing — that is not a fault.
 
 **Never diagnose geometry from a photo or video of a moving pattern.** Phone
 rolling shutter smears a travelling shape along its axis of motion, which is
