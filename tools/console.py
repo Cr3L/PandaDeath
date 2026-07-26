@@ -36,21 +36,27 @@ BAUD = 115200
 # holding the CPU, not a guess at how long a command takes.
 QUIET_TIME = 0.4
 
-# Ceiling on any one command, so a board that never replies fails rather than
-# hanging the caller.
+# Ceiling on any one command, measured from when the read started rather than
+# from the last byte. A board logging continuously — which is what Wi-Fi
+# reconnect attempts look like — refreshes the quiet timer forever and would
+# otherwise never let go.
 REPLY_TIMEOUT = 5.0
 
 
 def drain(port: serial.Serial, settle: float) -> bytes:
-    """Read until the board has been quiet for `settle` seconds."""
+    """Read until the board has been quiet for `settle` seconds, or the ceiling."""
     out = bytearray()
-    last = time.time()
+    started = time.time()
+    last = started
     while time.time() - last < settle:
         chunk = port.read(256)
         if chunk:
             out += chunk
             last = time.time()
-        if time.time() - last > REPLY_TIMEOUT:
+        if time.time() - started > REPLY_TIMEOUT:
+            # Deliberately returns what it has rather than raising: a truncated
+            # reply still tells the caller what the board said, and a chatty
+            # board is not an error.
             break
     return bytes(out)
 
