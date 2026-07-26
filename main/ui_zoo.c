@@ -45,7 +45,12 @@ static void show_animal(uint32_t index)
      * does not stack a second one. */
     lv_animimg_start(s_animimg);
 
-    ESP_LOGI(TAG, "%s", animal->name);
+    /* DEBUG because it fires on a timer and the console shares this UART — see
+     * the rule in CLAUDE.md's Conventions. Kept rather than deleted because it
+     * is how the cycle timing was verified. Recovering it needs
+     * CONFIG_LOG_MAXIMUM_LEVEL raised and a rebuild, not a runtime
+     * esp_log_level_set: at the current level 3 this call compiles out. */
+    ESP_LOGD(TAG, "%s", animal->name);
 }
 
 static void next_animal_cb(lv_timer_t *timer)
