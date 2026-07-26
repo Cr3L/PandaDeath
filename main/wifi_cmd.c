@@ -6,7 +6,6 @@
 #include "console.h"
 #include "esp_check.h"
 #include "esp_console.h"
-#include "esp_wifi.h"
 #include "wifi_creds.h"
 #include "wifi_sta.h"
 
@@ -48,18 +47,18 @@ static int cmd_wifi_set(int argc, char **argv)
 
     /* Applying them immediately is the whole reason this is worth doing at a
      * console: the alternative is store-then-reboot, and a reboot makes a
-     * wrong password indistinguishable from a bad flash. Reported separately
-     * from the store because they fail for unrelated reasons — NVS is full
-     * versus the radio is not up. */
-    printf("stored.\n");
-
-    err = wifi_sta_reconnect();
+     * wrong password indistinguishable from a bad flash.
+     *
+     * One outcome line, printed after both steps. Announcing the store and
+     * then the connection separately reads as two stores when the second
+     * fails, and the store is not interesting on its own. */
+    err = wifi_sta_credentials_changed();
     if (err != ESP_OK) {
-        printf("stored, but could not reconnect: %s\n", esp_err_to_name(err));
+        printf("stored, but the station would not take them: %s\n", esp_err_to_name(err));
         return 1;
     }
 
-    printf("connecting; check wifi_status in a few seconds\n");
+    printf("stored; connecting, check wifi_status in a few seconds\n");
     return 0;
 }
 
@@ -107,7 +106,16 @@ static int cmd_wifi_clear(int argc, char **argv)
         return 1;
     }
 
-    printf("cleared.\n");
+    /* Same call wifi_set makes, for the same reason: the stored credentials
+     * changed. Without it the board stays on the network it was just told to
+     * forget — green glyph, live IP, and wifi_show reporting nothing stored. */
+    err = wifi_sta_credentials_changed();
+    if (err != ESP_OK) {
+        printf("cleared, but the station would not stop: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("cleared; station stopped\n");
     return 0;
 }
 
@@ -119,19 +127,17 @@ static int cmd_wifi_status(int argc, char **argv)
     wifi_status_t status = wifi_sta_status();
     printf("state: %s\n", wifi_status_name(status));
 
-    if (status == WIFI_STATUS_CONNECTED) {
-        char ip[16];
-        wifi_sta_ip(ip, sizeof(ip));
-        printf("ip: %s\n", ip);
+    char ip[IP4ADDR_STRLEN_MAX];
+    wifi_sta_ip(ip, sizeof(ip));
 
-        /* RSSI only when connected, because ap_info is stale otherwise and a
-         * plausible-looking number from the last association is worse than no
-         * number. It is the first thing to check when a link associates and
-         * then drops: below about -75 dBm, the answer is usually distance. */
-        wifi_ap_record_t ap;
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-            printf("rssi: %d dBm\n", ap.rssi);
-        }
+    int rssi;
+    /* wifi_sta owns the "only meaningful when connected" rule for both of
+     * these, so this prints what it is given rather than re-deriving when to
+     * ask. RSSI is the first thing to check when a link associates and then
+     * drops: below about -75 dBm the answer is usually distance. */
+    if (wifi_sta_rssi(&rssi)) {
+        printf("ip: %s\n", ip);
+        printf("rssi: %d dBm\n", rssi);
     }
     return 0;
 }

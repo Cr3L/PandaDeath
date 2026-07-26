@@ -1,8 +1,10 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "esp_netif_ip_addr.h"  /* IP4ADDR_STRLEN_MAX, the size wifi_sta_ip wants */
 #include "wifi_status.h"
 
 /* Wi-Fi station: reads the credentials wifi_creds.c stored and keeps the board
@@ -22,10 +24,18 @@
  * rebooting the one path out of the problem. */
 esp_err_t wifi_sta_start(void);
 
-/* Re-reads NVS and re-associates. For use after wifi_set, so that new
- * credentials do not need a reboot to take effect. Safe before wifi_sta_start()
- * only in the sense that it will fail cleanly. */
-esp_err_t wifi_sta_reconnect(void);
+/* Tells the station the stored credentials changed: re-reads NVS and applies
+ * whatever is there now, so nothing needs a reboot to take effect.
+ *
+ * Covers clearing as well as setting. Credentials gone stops the station and
+ * reports NO_CREDENTIALS rather than failing — otherwise the board stays
+ * associated to credentials it has been told to forget, with the indicator
+ * green and wifi_show reporting nothing stored.
+ *
+ * Every command that mutates the credential store should call this. Naming it
+ * for the event rather than for one caller's intent ("reconnect") is what stops
+ * the next such command forgetting to. */
+esp_err_t wifi_sta_credentials_changed(void);
 
 /* Registers the single status observer. Called before wifi_sta_start() so no
  * transition is missed; a second call replaces the first. One observer rather
@@ -36,5 +46,11 @@ void wifi_sta_set_observer(wifi_status_observer_t observer);
 wifi_status_t wifi_sta_status(void);
 
 /* Fills `buf` with the current IPv4 address, or "0.0.0.0" when not connected.
- * Wants at least 16 bytes. */
+ * Wants at least IP4ADDR_STRLEN_MAX bytes. */
 void wifi_sta_ip(char *buf, size_t len);
+
+/* Signal strength in dBm, false when not connected. Reported through here
+ * rather than by letting callers reach for esp_wifi_sta_get_ap_info: this file
+ * is the only one that talks to the driver, and the "connected or it is stale"
+ * rule lives with the status it depends on. */
+bool wifi_sta_rssi(int *rssi);

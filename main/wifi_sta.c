@@ -30,7 +30,6 @@ static wifi_status_t s_status = WIFI_STATUS_NO_CREDENTIALS;
 static esp_netif_t *s_netif;
 static esp_timer_handle_t s_retry_timer;
 static uint32_t s_retry_ms = RETRY_MIN_MS;
-static bool s_started;
 
 /* Last disconnect reason logged at WARN, so an unchanging one is not repeated
  * onto a UART someone may be typing at. -1 is no real reason code, so the first
@@ -237,23 +236,24 @@ esp_err_t wifi_sta_start(void)
     esp_err_t err = apply_credentials();
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         /* Nothing stored. The driver is fully initialised and idle, which is
-         * what makes wifi_sta_reconnect() work the moment someone types
-         * wifi_set — no reboot, and no second bring-up path to keep correct. */
+         * what makes wifi_sta_credentials_changed() work the moment someone
+         * types wifi_set — no reboot, and no second bring-up path to keep
+         * correct. */
         ESP_LOGI(TAG, "no credentials stored; idle until wifi_set");
         set_status(WIFI_STATUS_NO_CREDENTIALS);
-        s_started = true;
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(err, TAG, "credentials");
 
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
-    s_started = true;
-    return ESP_OK;
+    return esp_wifi_start();
 }
 
-esp_err_t wifi_sta_reconnect(void)
+esp_err_t wifi_sta_credentials_changed(void)
 {
-    ESP_RETURN_ON_FALSE(s_started, ESP_ERR_INVALID_STATE, TAG, "not started");
+    /* The timer exists from the end of wifi_sta_start() and is never destroyed,
+     * so its handle is the same "are we up?" answer a separate flag would give,
+     * without a second thing to keep in step. */
+    ESP_RETURN_ON_FALSE(s_retry_timer != NULL, ESP_ERR_INVALID_STATE, TAG, "not started");
 
     /* Stop the pending retry first. Without this, a reconnect landing during a
      * backoff wait leaves the old timer armed, and it fires a second
@@ -279,8 +279,26 @@ esp_err_t wifi_sta_reconnect(void)
      * connects, so there is exactly one path that begins an association
      * instead of two racing to. */
     ESP_RETURN_ON_ERROR(esp_wifi_stop(), TAG, "wifi stop");
-    ESP_RETURN_ON_ERROR(apply_credentials(), TAG, "credentials");
-    set_status(WIFI_STATUS_CONNECTING);
+
+    /* Credentials gone is a normal outcome here, not an error: wifi_clear calls
+     * this too. Leaving the station associated to credentials the device has
+     * been told to forget is the one state the indicator exists to make honest
+     * — it would sit green while wifi_show reports nothing stored.
+     *
+     * Handling set and clear in one function is the point of the name. Hanging
+     * "re-apply the stored credentials" off whichever command happened to need
+     * it first is what let wifi_clear forget to. */
+    esp_err_t err = apply_credentials();
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "credentials cleared; station stopped");
+        set_status(WIFI_STATUS_NO_CREDENTIALS);
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "credentials");
+
+    /* No set_status(CONNECTING) here: esp_wifi_start() raises STA_START, whose
+     * handler owns that transition. Two authors of one state is what the stop/
+     * start sequence above exists to avoid. */
     return esp_wifi_start();
 }
 
@@ -300,5 +318,19 @@ void wifi_sta_ip(char *buf, size_t len)
     if (s_netif != NULL && s_status == WIFI_STATUS_CONNECTED) {
         esp_netif_get_ip_info(s_netif, &info);
     }
-    snprintf(buf, len, IPSTR, IP2STR(&info.ip));
+    esp_ip4addr_ntoa(&info.ip, buf, (int)len);
+}
+
+/* Meaningless unless connected, so the caller is not asked to know that: a
+ * stale RSSI from the last association is worse than no number, because it
+ * looks like a measurement. Keeps esp_wifi to this file — every other module
+ * asks wifi_sta rather than the driver. */
+bool wifi_sta_rssi(int *rssi)
+{
+    wifi_ap_record_t ap;
+    if (s_status != WIFI_STATUS_CONNECTED || esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return false;
+    }
+    *rssi = ap.rssi;
+    return true;
 }

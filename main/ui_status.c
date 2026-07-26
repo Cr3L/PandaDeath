@@ -4,6 +4,7 @@
 
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
+#include "ui_palette.h"
 
 /* Indicator palette. The accent matches ui_test.c's, which is the device's
  * green; the rest are chosen to read at a glance on a 240 px round panel from
@@ -22,7 +23,7 @@
  * toward yellow: the gap has to be opened from both ends. Judged by eye on the
  * hardware, which is the only instrument that settles this — a photo would have
  * blown both out to white. */
-#define COLOR_CONNECTED  0x00E676  /* the device green */
+#define COLOR_CONNECTED  UI_COLOR_ACCENT  /* the device green */
 #define COLOR_CONNECTING 0xFFC400  /* yellow: trying */
 #define COLOR_IDLE       0x4A5A50  /* grey-green: nothing wrong, nothing to say */
 #define COLOR_FAULT      0xFF1744  /* crimson: has credentials, cannot use them */
@@ -42,13 +43,16 @@ static wifi_status_t s_status = WIFI_STATUS_NO_CREDENTIALS;
 
 static uint32_t status_color(wifi_status_t status)
 {
+    /* No default: an unhandled status should be a -Wswitch warning at build
+     * time, not a silent grey glyph that looks like a working indicator.
+     * wifi_status_name() is written the same way for the same reason. */
     switch (status) {
-    case WIFI_STATUS_CONNECTED:    return COLOR_CONNECTED;
-    case WIFI_STATUS_CONNECTING:   return COLOR_CONNECTING;
-    case WIFI_STATUS_DISCONNECTED: return COLOR_FAULT;
-    case WIFI_STATUS_NO_CREDENTIALS:
-    default:                       return COLOR_IDLE;
+    case WIFI_STATUS_CONNECTED:      return COLOR_CONNECTED;
+    case WIFI_STATUS_CONNECTING:     return COLOR_CONNECTING;
+    case WIFI_STATUS_DISCONNECTED:   return COLOR_FAULT;
+    case WIFI_STATUS_NO_CREDENTIALS: return COLOR_IDLE;
     }
+    return COLOR_IDLE;
 }
 
 /* Assumes the LVGL lock is held. */
