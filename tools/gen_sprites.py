@@ -4,9 +4,14 @@ Run from the repo root after editing anything in assets/:
 
     python3 tools/gen_sprites.py
 
-Needs Pillow, which lives in the system python rather than the IDF virtualenv —
-this is a build-time authoring tool, not something the firmware build calls, so
-it is run by hand and its output is committed.
+Needs Pillow >= 12, which lives in the system python rather than the IDF
+virtualenv — this is a build-time authoring tool, not something the firmware
+build calls, so it is run by hand and its output is committed.
+
+The version floor is real: frame_bytes() uses get_flattened_data(), which
+replaced getdata() in Pillow 12 and does not exist before it. On an older
+Pillow this dies with AttributeError on the first frame, and because the
+generated C is committed, nothing else in the tree would notice.
 
 Output is RGB565A8: a plane of RGB565 pixels followed by a plane of 8-bit alpha.
 Chosen over the more obvious indexed format even though the art has under ten

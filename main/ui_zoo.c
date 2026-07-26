@@ -29,10 +29,13 @@ static void show_animal(uint32_t index)
 {
     const zoo_animal_t *animal = &zoo_animals[index];
 
-    /* Casting away the outer const only. lv_animimg_set_src takes a mutable
-     * array because its signature predates the const, but it only reads —
-     * see lv_animimage.c, which copies the pointer and indexes it. Keeping the
-     * const in the table is what puts those 192 bytes in flash. */
+    /* The cast drops the const on the array *elements*: the table is
+     * `const void *const *`, and lv_animimg_set_src wants `const void **`.
+     * Sound because the function only reads — lv_animimage.c stores the
+     * pointer and indexes it, and index_change() passes each element straight
+     * to lv_image_set_src. That element const is not decoration: without it
+     * the array is one of mutable pointers and the linker must put all 192
+     * bytes in DRAM rather than flash. */
     lv_animimg_set_src(s_animimg, (const void **)animal->frames, ZOO_FRAMES);
     lv_animimg_set_duration(s_animimg, ZOO_LOOP_MS);
     lv_animimg_set_repeat_count(s_animimg, LV_ANIM_REPEAT_INFINITE);

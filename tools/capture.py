@@ -44,6 +44,10 @@ DURATION = float(sys.argv[1]) if len(sys.argv) > 1 else 30.0
 # blocks the next flash, which needs the port to itself.
 WAIT_FOR_GESTURE = 600.0
 
+# How long the board gets to re-enumerate once it has been unplugged. Measured
+# at ~700 ms; 30 s is slack for a slow hub, not a judgement call.
+RECONNECT_TIMEOUT = 30.0
+
 SOUNDS = "/usr/share/sounds/freedesktop/stereo"
 
 
@@ -128,7 +132,15 @@ emit(b"\n--- board unplugged, waiting for it to come back ---\n")
 
 # Phase 2: wait for the board to reappear, then capture for DURATION from that
 # moment. This is the whole point of the rewrite — the clock starts here.
-while time.time() < gesture_deadline:
+#
+# Its own deadline, not the one phase 1 was counting against. Sharing that one
+# meant the time spent waiting for the human came out of the time allowed for
+# the board to enumerate: unplug at minute nine of a ten-minute wait and this
+# loop gets one minute, or with worse luck expires instantly and reports "board
+# never came back" at a board that is merely mid-enumeration. Re-enumeration
+# takes ~700 ms and does not depend on how long anyone deliberated first.
+reconnect_deadline = time.time() + RECONNECT_TIMEOUT
+while time.time() < reconnect_deadline:
     ser = open_port()
     if ser is not None:
         break
