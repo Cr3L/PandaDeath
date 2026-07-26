@@ -57,14 +57,68 @@ exists and wins. Delete `sdkconfig` to pick up new defaults.
 
 ## Verifying changes
 
+**Never push without asking first.** Committing locally is fine and does not
+need permission. Publishing does: before `git push`, say what is in the
+commits, what each change has actually been verified against — hardware, or
+only a clean build — and what is still outstanding. Then wait. The distinction
+between "verified on the device" and "compiles and reads correctly" is the
+thing being checked for, so do not blur it.
+
 **Every behavioural change gets flashed and checked on hardware before it is
 committed.** Two of today's bugs — a mirrored display and a silently overridden
 panel setting — compiled cleanly, reviewed cleanly, and were only caught on the
 device.
 
-Serial: `idf.py monitor` needs a TTY, so it must be run by Michael, not by an
-agent. For scripted capture use `tools/capture.py`, which reopens the port
-across a replug.
+## Do it yourself wherever the hardware allows
+
+**Every step handed to Michael is a step that can go wrong in a way neither of
+you can see.** Prefer the tool an agent can drive:
+
+| Need | Use | Not |
+|---|---|---|
+| ask the running firmware something | `tools/console.py` | "type this at the monitor" |
+| boot log across a replug | `tools/capture.py` | "paste what it printed" |
+| is the board in the bootloader? | `esptool --before no_reset chip_id` | "does the screen look dark?" |
+
+Reserve Michael for what genuinely cannot be automated: the two USB gestures,
+colour and geometry judgements, and typing a real credential. Everything else
+you should do and then *report*.
+
+This is not politeness, it is diagnosis. A session spent on "nothing happens
+when I press Enter" ended with the board having been parked in the bootloader
+the whole time — invisible from a description, one command to confirm. When
+something is wrong, the fastest question is always the one you can answer
+yourself.
+
+Say which machine a command is for. `$` is Fedora, `panda>` is the board, and
+`panda>` is **printed by the board, not typed** — that has been misread as
+something to type. Commands aimed at the wrong prompt produce `command not
+found`, which reads as a broken tool rather than a wrong window.
+
+### The port is exclusive, and monitors outlive their tabs
+
+`idf.py monitor` locks `/dev/ttyUSB0`; nothing else — not `console.py`, not
+`esptool`, not a second monitor — can touch the board while it runs. **Closing
+the terminal tab does not end it. Only Ctrl-] does.** Stale monitors from
+hours earlier have now blocked the port three times, presenting as
+`[Errno 11] Could not exclusively lock port`.
+
+Do not guess at which process is holding it:
+
+```sh
+fuser -v /dev/ttyUSB0
+pkill -f "esp_idf_[m]onitor"   # brackets, or the pattern kills your own shell
+```
+
+Never start a monitor and an agent-side tool in the same breath — check the
+port is free first, and prefer taking it back over asking Michael to close
+something.
+
+## Serial
+
+`idf.py monitor` needs a TTY, so it must be run by Michael, not by an agent.
+For scripted capture use `tools/capture.py`, which reopens the port across a
+replug.
 
 It imports pyserial, which exists **only in the IDF virtualenv** — a bare
 `python3 tools/capture.py` dies on `ModuleNotFoundError: No module named
@@ -110,7 +164,10 @@ boot_mode.h    which of the three the build brings up
 console.c/h    the REPL on the log UART; owns no commands
 wifi_cmd.c/h   the wifi_* console commands
 wifi_creds.c/h Wi-Fi credentials in NVS — the only way one gets in
-main.c         boot path: NVS → commands → console → display → UI → fade up
+wifi_sta.c/h   the station: associates, reconnects with backoff
+wifi_status.h  the status enum alone, so the radio and the UI share no header
+ui_status.c/h  the connection glyph, on every screen
+main.c         boot path: NVS → commands → console → display → UI → fade → wifi
 ```
 
 Console commands live with the module whose state they touch, not in
@@ -171,8 +228,11 @@ bug found so far came from reading esp_lcd's source by hand.
 What the device actually does. Wi-Fi is the prerequisite for every candidate
 (clock + weather, Klipper/Moonraker monitor, MQTT display).
 
-The credential half of that is **done**: `wifi_set` / `wifi_show` / `wifi_clear`
-store to NVS, verified surviving a power cycle on hardware. What remains is the
-connect half — `esp_wifi` station bring-up reading those credentials, reconnect
-handling, and an on-screen status indicator. SNTP is deliberately a step after
-that, not folded in, so association and time sync fail separately.
+Wi-Fi itself is **done**. Credentials go in at the console and survive a power
+cycle; the station reads them at boot, associates, reconnects with exponential
+backoff, and reports on the glass. `wifi_set` reassociates a running station
+without a reboot. All of it verified on hardware, including the failure paths.
+
+SNTP is the next step and was deliberately left out of the connect work, so
+that association and time sync fail separately rather than as one opaque
+"nothing works".
