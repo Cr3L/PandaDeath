@@ -3,7 +3,9 @@
 #include "display.h"
 #include "selftest.h"
 #include "ui.h"
+#include "ui_status.h"
 #include "wifi_cmd.h"
+#include "wifi_sta.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -64,6 +66,18 @@ void app_main(void)
      * of a black screen. The LEDC fader runs in hardware and returns
      * immediately, costing no CPU and no boot latency. */
     ESP_ERROR_CHECK(display_fade_backlight(100, BACKLIGHT_FADE_MS));
+
+    /* Wi-Fi last, and only in the LVGL modes: the radio is the slowest thing
+     * here and the only one that can fail for reasons outside the board, so
+     * everything that can be shown is on the glass before it starts. The
+     * self-test path skips it entirely — it exists to exercise the panel with
+     * as little else running as possible.
+     *
+     * main.c is where the two modules meet. wifi_sta.c holds no LVGL and
+     * ui_status.c holds no radio; wiring them here keeps that true and puts the
+     * dependency somewhere a reader of the boot path can see it. */
+    wifi_sta_set_observer(ui_status_set);
+    ESP_ERROR_CHECK(wifi_sta_start());
 #endif
 
     /* LVGL runs in its own task; nothing further is needed here. */

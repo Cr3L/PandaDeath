@@ -5,6 +5,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "ui_status.h"
 #include "ui_test.h"
 #include "ui_zoo.h"
 
@@ -20,6 +21,11 @@ static void build_active_screen(void)
 #else
     ui_zoo_screen_build();
 #endif
+
+    /* After the screen, so the indicator lands on top of whatever it built.
+     * Every screen gets one: the connection is a property of the device, not of
+     * the view, and making each screen opt in guarantees a future one forgets. */
+    ui_status_build();
 }
 
 /* Rows held in each draw buffer. LVGL renders a slice at a time and flushes it,

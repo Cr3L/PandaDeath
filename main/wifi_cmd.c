@@ -6,7 +6,9 @@
 #include "console.h"
 #include "esp_check.h"
 #include "esp_console.h"
+#include "esp_wifi.h"
 #include "wifi_creds.h"
+#include "wifi_sta.h"
 
 static const char *TAG = "wifi_cmd";
 
@@ -44,11 +46,20 @@ static int cmd_wifi_set(int argc, char **argv)
         return 1;
     }
 
-    /* Says only what this build actually does. Nothing reads these credentials
-     * yet, so "reboot to connect" would send someone to debug NVS — the one
-     * part that works — when the reboot changed nothing. The connect path adds
-     * that sentence in the commit that earns it. */
+    /* Applying them immediately is the whole reason this is worth doing at a
+     * console: the alternative is store-then-reboot, and a reboot makes a
+     * wrong password indistinguishable from a bad flash. Reported separately
+     * from the store because they fail for unrelated reasons — NVS is full
+     * versus the radio is not up. */
     printf("stored.\n");
+
+    err = wifi_sta_reconnect();
+    if (err != ESP_OK) {
+        printf("stored, but could not reconnect: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("connecting; check wifi_status in a few seconds\n");
     return 0;
 }
 
@@ -100,6 +111,31 @@ static int cmd_wifi_clear(int argc, char **argv)
     return 0;
 }
 
+static int cmd_wifi_status(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    wifi_status_t status = wifi_sta_status();
+    printf("state: %s\n", wifi_status_name(status));
+
+    if (status == WIFI_STATUS_CONNECTED) {
+        char ip[16];
+        wifi_sta_ip(ip, sizeof(ip));
+        printf("ip: %s\n", ip);
+
+        /* RSSI only when connected, because ap_info is stale otherwise and a
+         * plausible-looking number from the last association is worse than no
+         * number. It is the first thing to check when a link associates and
+         * then drops: below about -75 dBm, the answer is usually distance. */
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            printf("rssi: %d dBm\n", ap.rssi);
+        }
+    }
+    return 0;
+}
+
 static const esp_console_cmd_t COMMANDS[] = {
     {
         .command = "wifi_set",
@@ -115,6 +151,11 @@ static const esp_console_cmd_t COMMANDS[] = {
         .command = "wifi_clear",
         .help = "Forget the stored credentials",
         .func = cmd_wifi_clear,
+    },
+    {
+        .command = "wifi_status",
+        .help = "Show the connection state, and the IP and signal when connected",
+        .func = cmd_wifi_status,
     },
 };
 
