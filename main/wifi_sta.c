@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "esp_check.h"
-#include "esp_event.h"
+#include "esp_event.h"  /* esp_event_handler_instance_register */
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -25,7 +25,6 @@ static const char *TAG = "wifi_sta";
 #define RETRY_MIN_MS 1000
 #define RETRY_MAX_MS 30000
 
-static wifi_status_observer_t s_observer;
 static wifi_status_t s_status = WIFI_STATUS_NO_CREDENTIALS;
 static esp_netif_t *s_netif;
 static esp_timer_handle_t s_retry_timer;
@@ -47,8 +46,8 @@ const char *wifi_status_name(wifi_status_t status)
     return "unknown";
 }
 
-/* Notifies only on an actual change, so that a network flapping through the
- * same state repeatedly does not repaint the screen or fill the log. */
+/* Logs only on an actual change, so that a network flapping through the same
+ * state repeatedly does not fill the log. */
 static void set_status(wifi_status_t status)
 {
     if (s_status == status) {
@@ -56,9 +55,6 @@ static void set_status(wifi_status_t status)
     }
     s_status = status;
     ESP_LOGI(TAG, "%s", wifi_status_name(status));
-    if (s_observer) {
-        s_observer(status);
-    }
 }
 
 static void retry_cb(void *arg)
@@ -203,8 +199,10 @@ static esp_err_t apply_credentials(void)
 
 esp_err_t wifi_sta_start(void)
 {
-    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
-    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
+    /* esp_netif_init() and the default event loop are the boot path's, not
+     * this module's. They were here while Wi-Fi was their only user; SNTP needs
+     * both too, and whichever module created them would silently become the one
+     * the other had to be started after. */
     s_netif = esp_netif_create_default_wifi_sta();
     ESP_RETURN_ON_FALSE(s_netif != NULL, ESP_FAIL, TAG, "netif create");
 
@@ -300,11 +298,6 @@ esp_err_t wifi_sta_credentials_changed(void)
      * handler owns that transition. Two authors of one state is what the stop/
      * start sequence above exists to avoid. */
     return esp_wifi_start();
-}
-
-void wifi_sta_set_observer(wifi_status_observer_t observer)
-{
-    s_observer = observer;
 }
 
 wifi_status_t wifi_sta_status(void)

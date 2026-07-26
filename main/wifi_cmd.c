@@ -4,12 +4,9 @@
 #include <string.h>
 
 #include "console.h"
-#include "esp_check.h"
 #include "esp_console.h"
 #include "wifi_creds.h"
 #include "wifi_sta.h"
-
-static const char *TAG = "wifi_cmd";
 
 /* Replies go through printf, not ESP_LOGI. A console reply is addressed to the
  * person who just typed: it wants no timestamp, no level letter and no tag, and
@@ -108,7 +105,8 @@ static int cmd_wifi_clear(int argc, char **argv)
 
     /* Same call wifi_set makes, for the same reason: the stored credentials
      * changed. Without it the board stays on the network it was just told to
-     * forget — green glyph, live IP, and wifi_show reporting nothing stored. */
+     * forget — live IP, wifi_status reporting "connected", and wifi_show
+     * reporting nothing stored. */
     err = wifi_sta_credentials_changed();
     if (err != ESP_OK) {
         printf("cleared, but the station would not stop: %s\n", esp_err_to_name(err));
@@ -167,9 +165,5 @@ static const esp_console_cmd_t COMMANDS[] = {
 
 esp_err_t wifi_cmd_register(void)
 {
-    for (size_t i = 0; i < sizeof(COMMANDS) / sizeof(COMMANDS[0]); i++) {
-        ESP_RETURN_ON_ERROR(esp_console_cmd_register(&COMMANDS[i]),
-                            TAG, "failed to register %s", COMMANDS[i].command);
-    }
-    return ESP_OK;
+    return console_register(COMMANDS, sizeof(COMMANDS) / sizeof(COMMANDS[0]));
 }

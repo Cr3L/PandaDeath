@@ -3,12 +3,16 @@
 #include <stdint.h>
 
 #include "lvgl.h"
-#include "ui_palette.h"
 
 /* Screen palette. Kept together so a retheme is one edit rather than a hunt
- * through widget setup. The accent is shared with the status indicator, so it
- * lives in ui_palette.h. */
-#define COLOR_ACCENT     UI_COLOR_ACCENT  /* arc indicator */
+ * through widget setup.
+ *
+ * The accent briefly lived in a shared ui_palette.h, back when the status
+ * indicator wanted the same green. It was the only entry, and with the
+ * indicator gone it had one consumer — a header whose stated rule was "only
+ * what more than one file needs". Folded back rather than left as a shared
+ * thing nothing shares. */
+#define COLOR_ACCENT     0x00E676  /* arc indicator, the device green */
 #define COLOR_TRACK      0x1A2E22  /* arc groove, a dark cast of the accent */
 #define COLOR_SUBTITLE   0x7E9488
 

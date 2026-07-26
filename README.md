@@ -20,12 +20,18 @@ Verified on hardware:
   compiled to C sprite tables. This is what the board shows today.
 - **A serial console** on the log UART, and **Wi-Fi credentials in NVS**
   entered through it. Confirmed surviving a power cycle.
+- **Wi-Fi** — the station reads those credentials at boot, associates, and
+  reconnects with exponential backoff. Failure paths confirmed too: wrong
+  password, absent network, and credentials changed on a live station.
+- **The clock** — SNTP from `pool.ntp.org` a few seconds after the address
+  arrives, with the timezone stored in NVS through a `tz` command.
 - **A partition table sized for OTA**, laid out before Wi-Fi on purpose.
 
-Not done: the radio itself. Credentials are stored but nothing connects with
-them yet. That is the next piece of work, and it is what unblocks every
-candidate for what this device eventually *does* — clock and weather, a
-Klipper/Moonraker monitor, an MQTT display. None of those has been chosen.
+Not done: anything that uses the network for a purpose. The board knows who it
+is, where it is on the network and what time it is, and shows none of it — the
+glass still shows only the zoo. Clock and weather, a Klipper/Moonraker monitor,
+an MQTT display are all unblocked and none has been chosen. Each needs a screen
+design, which is the first real UI decision this project has had to make.
 
 ## Hardware
 

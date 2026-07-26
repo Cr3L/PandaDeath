@@ -36,6 +36,15 @@ esp_err_t console_init(void)
     return esp_console_start_repl(repl);
 }
 
+esp_err_t console_register(const esp_console_cmd_t *cmds, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        ESP_RETURN_ON_ERROR(esp_console_cmd_register(&cmds[i]),
+                            TAG, "failed to register %s", cmds[i].command);
+    }
+    return ESP_OK;
+}
+
 void console_forget_history(void)
 {
     linenoiseHistoryFree();

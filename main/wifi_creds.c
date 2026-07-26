@@ -2,12 +2,8 @@
 
 #include <string.h>
 
-/* Our own namespace, deliberately not the driver's. esp_wifi keeps its
- * calibration and its own copy of the last-used credentials under
- * "nvs.net80211" in this same partition (CONFIG_ESP_WIFI_NVS_ENABLED=y), and
- * writing there would mean two owners for one set of keys. Ours is the source
- * of truth; the driver's copy is its business. */
-#define CREDS_NAMESPACE "pandadeath"
+#include "storage.h"
+
 #define KEY_SSID "wifi_ssid"
 #define KEY_PASS "wifi_pass"
 
@@ -33,7 +29,7 @@ esp_err_t wifi_creds_set(const char *ssid, const char *pass)
     }
 
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(CREDS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         return err;
     }
@@ -60,7 +56,7 @@ esp_err_t wifi_creds_get(char *ssid, size_t ssid_len, char *pass, size_t pass_le
     /* An unconfigured board fails here, at the open, rather than at the get
      * below: the namespace does not exist until something is written to it.
      * Both report ESP_ERR_NVS_NOT_FOUND, which is what the caller acts on. */
-    esp_err_t err = nvs_open(CREDS_NAMESPACE, NVS_READONLY, &handle);
+    esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
         return err;
     }
@@ -81,7 +77,7 @@ esp_err_t wifi_creds_get(char *ssid, size_t ssid_len, char *pass, size_t pass_le
 esp_err_t wifi_creds_clear(void)
 {
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(CREDS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &handle);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return ESP_OK;  /* Never configured; the caller's wish already holds. */
     }

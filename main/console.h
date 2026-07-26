@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stddef.h>
+
+#include "esp_console.h"
 #include "esp_err.h"
 
 /* Starts the serial console on the same UART the log already uses.
@@ -18,6 +21,15 @@
  * Runs in its own task from here on and returns immediately. Commands therefore
  * execute on that task, not app_main's. */
 esp_err_t console_init(void);
+
+/* Registers a module's whole command table, failing on the first that will not
+ * take and naming it.
+ *
+ * This is registration, not a command, so it does belong here — the rule above
+ * is that console.c owns no *commands*, and a loop that knows nothing about
+ * what it is registering does not break it. Each feature module was otherwise
+ * copying the same seven lines, including an error path nobody re-reads. */
+esp_err_t console_register(const esp_console_cmd_t *cmds, size_t count);
 
 /* Drops the line-editor history, so a line that has just been typed cannot be
  * recovered from DRAM or with the up arrow.

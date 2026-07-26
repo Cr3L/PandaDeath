@@ -2,13 +2,16 @@
 #include "console.h"
 #include "display.h"
 #include "selftest.h"
+#include "time_cmd.h"
+#include "time_sync.h"
 #include "ui.h"
-#include "ui_status.h"
 #include "wifi_cmd.h"
 #include "wifi_sta.h"
 
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -49,6 +52,7 @@ void app_main(void)
     /* Commands are registered before the REPL starts, so the prompt never
      * accepts one that does not exist yet. */
     ESP_ERROR_CHECK(wifi_cmd_register());
+    ESP_ERROR_CHECK(time_cmd_register());
     ESP_ERROR_CHECK(console_init());
 
     /* Init failure stays fatal: there is no useful fallback for a device whose
@@ -73,10 +77,18 @@ void app_main(void)
      * self-test path skips it entirely — it exists to exercise the panel with
      * as little else running as possible.
      *
-     * main.c is where the two modules meet. wifi_sta.c holds no LVGL and
-     * ui_status.c holds no radio; wiring them here keeps that true and puts the
-     * dependency somewhere a reader of the boot path can see it. */
-    wifi_sta_set_observer(ui_status_set);
+     * The netif layer and the default event loop are brought up here rather
+     * than inside either module, because both need them. Whichever one created
+     * them would quietly become the one the other had to be started after — an
+     * ordering constraint with nothing in the source to state it. */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* Time before Wi-Fi, so the got-IP handler exists before the radio can
+     * raise the event it waits for. The reverse order works nearly always and
+     * fails on the one boot where association is unusually fast — the worst
+     * kind of bug to own. */
+    ESP_ERROR_CHECK(time_sync_start());
     ESP_ERROR_CHECK(wifi_sta_start());
 #endif
 
