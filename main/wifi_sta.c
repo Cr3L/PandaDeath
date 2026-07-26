@@ -74,6 +74,18 @@ static void retry_cb(void *arg)
 
 static void schedule_retry(void)
 {
+    /* Disarm first. esp_timer_start_once returns ESP_ERR_INVALID_STATE on an
+     * already-armed timer, and under ESP_ERROR_CHECK that is a reboot — a
+     * crash in the error path of the error path.
+     *
+     * Two disconnects can land inside one retry window: wifi_sta_reconnect
+     * calls esp_wifi_stop(), which raises DISCONNECTED and arms the timer, and
+     * the association that follows can fail before it fires. A wrong password
+     * against a nearby AP is rejected fast enough to do exactly that.
+     *
+     * Stopping an idle timer is defined and harmless, so this needs no test
+     * for which case it is in. */
+    esp_timer_stop(s_retry_timer);
     ESP_ERROR_CHECK(esp_timer_start_once(s_retry_timer, (uint64_t)s_retry_ms * 1000));
     ESP_LOGD(TAG, "retrying in %" PRIu32 " ms", s_retry_ms);
 
