@@ -158,6 +158,21 @@ typedef struct {
     int wind_direction;     /* degrees the wind blows *from*, 0..359 */
     int visibility;         /* miles */
     char text[32];          /* the station's own words: "Clear", "Thunderstorm" */
+
+    /* Change in pressure over the last three hours, in tenths of a millibar,
+     * negative for falling. WEATHER_UNKNOWN until enough readings have been
+     * collected to span the window.
+     *
+     * The only figure here the board works out for itself rather than reads off
+     * a wire, and the reason the pressure is worth showing at all: 1012 mb is
+     * inert, 1012 and falling is a forecast. Tenths because the interesting
+     * thresholds are 1 mb and 3 mb over three hours, and whole millibars would
+     * quantise a "notable" fall into the same bucket as no change.
+     *
+     * The history behind it lives in RAM, so this is blank for the first hours
+     * after every boot. That is the accepted cost of not writing to flash on a
+     * schedule forever. */
+    int pressure_trend;
 } weather_obs_t;
 
 /* A consistent snapshot, same discipline as weather_report_copy. `observed` is

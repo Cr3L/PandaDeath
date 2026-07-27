@@ -107,6 +107,26 @@ static const char *TAG = "weather";
  * report hourly has plainly stopped, while still tolerating one missed cycle. */
 #define OBS_STALE_SECONDS (2 * 60 * 60)
 
+/* Pressure readings kept for the trend.
+ *
+ * Sized against the poll interval rather than the station's: at one sample per
+ * OBS_INTERVAL_MS this spans six hours, which is twice the window the trend
+ * looks back over. The margin is deliberate — the nearest test station
+ * republishes every five minutes, so the ring fills at the poll rate and not at
+ * the station's, and a ring that spanned only three hours would have no reading
+ * old enough to compare against the moment one sample was missed. */
+#define PRESSURE_HISTORY 24
+
+/* The window the trend is quoted over. Three hours is the interval every
+ * falling-barometer rule of thumb is stated in, so it is the one that makes the
+ * number mean something to a person. */
+#define TREND_SPAN_SECONDS (3 * 60 * 60)
+
+/* Refuse to report a trend built from less history than this. A delta measured
+ * over twenty minutes and scaled up to three hours is noise wearing a confident
+ * arrow, which is worse than saying nothing. */
+#define TREND_MIN_SECONDS (2 * 60 * 60)
+
 /* Alerts are checked far more often than the forecast. One arriving half an
  * hour late has missed the weather it was warning about; a forecast has not. */
 #define ALERT_INTERVAL_MS (5 * 60 * 1000)
@@ -162,6 +182,35 @@ static char s_stations_url[URL_MAX];
 /* Nearest observation stations, nearest first, empty strings for unresolved.
  * Derived from s_stations_url and cleared alongside it. */
 static char s_stations[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX];
+
+/* Pressure history, oldest overwritten first.
+ *
+ * Keyed on the station's own reading time, never on when the fetch happened.
+ * That is what makes the poll interval a free parameter rather than a
+ * load-bearing one: a station republishing every five minutes and a board
+ * asking every fifteen still yields one sample per reading, and "three hours"
+ * means three real hours regardless of either rate. Polling more often than the
+ * station reports is harmless, because a repeated timestamp is not a new
+ * sample. */
+typedef struct {
+    time_t at;
+    int tenths;   /* tenths of a millibar; the display rounds, this does not */
+} pressure_sample_t;
+
+static pressure_sample_t s_pressure[PRESSURE_HISTORY];
+static int s_pressure_count;   /* how many slots are filled, up to the ring size */
+static int s_pressure_next;    /* where the next sample goes */
+
+/* Which station the history was built from.
+ *
+ * The readings are station pressure, which depends on the station's elevation —
+ * the nearest test station sits at 293 m, and a neighbour at a different height
+ * reports a different number for identical weather. Falling back to that
+ * neighbour would put a step of several millibars into the history and report
+ * it as a plummeting barometer. So a change of station discards the history
+ * rather than continuing it: a few hours of no trend, instead of a confident
+ * wrong one. */
+static char s_pressure_station[WEATHER_STATION_ID_MAX];
 
 const char *weather_alert_level_name(weather_alert_level_t level)
 {
@@ -581,7 +630,12 @@ static int obs_int(const cJSON *props, const char *name, double scale, double of
 #define KMH_TO_MPH    0.621371
 #define M_TO_MILES    (1.0 / 1609.344)
 
-static esp_err_t parse_observation(const char *body, weather_obs_t *out)
+/* `pressure_tenths` is separate from the struct's whole-millibar `pressure`
+ * rather than replacing it, because the two have different jobs: the display
+ * wants a number a person reads, and the trend wants resolution the rounding
+ * would throw away. Putting tenths in the public struct would push a unit
+ * conversion into every consumer to save one parameter here. */
+static esp_err_t parse_observation(const char *body, weather_obs_t *out, int *pressure_tenths)
 {
     cJSON *root = cJSON_Parse(body);
     ESP_RETURN_ON_FALSE(root != NULL, ESP_ERR_INVALID_RESPONSE, TAG, "obs json");
@@ -607,6 +661,8 @@ static esp_err_t parse_observation(const char *body, weather_obs_t *out)
     o.dewpoint       = obs_int(props, "dewpoint", C_TO_F_SCALE, C_TO_F_OFFSET);
     o.humidity       = obs_int(props, "relativeHumidity", 1.0, 0.0);
     o.pressure       = obs_int(props, "barometricPressure", PA_TO_MB, 0.0);
+    *pressure_tenths = obs_int(props, "barometricPressure", PA_TO_MB * 10.0, 0.0);
+    o.pressure_trend = WEATHER_UNKNOWN;   /* filled by the caller, which owns the history */
     o.wind           = obs_int(props, "windSpeed", KMH_TO_MPH, 0.0);
     o.gust           = obs_int(props, "windGust", KMH_TO_MPH, 0.0);
     o.wind_direction = obs_int(props, "windDirection", 1.0, 0.0);
@@ -729,6 +785,81 @@ static esp_err_t poll_alerts(void)
     return err;
 }
 
+/* Adds a reading to the history, unless it is one already held.
+ *
+ * The test is the station's timestamp, not ours. Polling faster than the
+ * station publishes is the normal case and must not fill the ring with copies
+ * of one reading, which would shorten the span it covers and quietly stop the
+ * trend from ever having three hours to look back over. */
+static void record_pressure(const char *station, time_t at, int tenths)
+{
+    if (tenths == WEATHER_UNKNOWN || at == 0) {
+        return;
+    }
+    if (strcmp(station, s_pressure_station) != 0) {
+        ESP_LOGD(TAG, "pressure history restarts at %s", station);
+        s_pressure_count = 0;
+        s_pressure_next = 0;
+        strlcpy(s_pressure_station, station, sizeof(s_pressure_station));
+    }
+    if (s_pressure_count > 0) {
+        const int newest = (s_pressure_next + PRESSURE_HISTORY - 1) % PRESSURE_HISTORY;
+        if (at <= s_pressure[newest].at) {
+            return;
+        }
+    }
+
+    s_pressure[s_pressure_next].at = at;
+    s_pressure[s_pressure_next].tenths = tenths;
+    s_pressure_next = (s_pressure_next + 1) % PRESSURE_HISTORY;
+    if (s_pressure_count < PRESSURE_HISTORY) {
+        s_pressure_count++;
+    }
+}
+
+/* Change over TREND_SPAN_SECONDS in tenths of a millibar, or WEATHER_UNKNOWN
+ * while there is not enough history.
+ *
+ * The comparison reading is the one whose age is closest to three hours, not
+ * simply the oldest held: once the ring spans six hours, the oldest sample
+ * would quote a six-hour change as if it were a three-hour one. Whatever is
+ * chosen, the delta is scaled to the full window, so a gap in the readings
+ * changes the precision of the answer and not its units. */
+static int pressure_trend(void)
+{
+    if (s_pressure_count < 2) {
+        return WEATHER_UNKNOWN;
+    }
+
+    const int newest = (s_pressure_next + PRESSURE_HISTORY - 1) % PRESSURE_HISTORY;
+    const time_t now = s_pressure[newest].at;
+
+    int best = -1;
+    time_t best_miss = 0;
+    for (int i = 0; i < s_pressure_count; i++) {
+        if (i == newest) {
+            continue;
+        }
+        const time_t span = now - s_pressure[i].at;
+        if (span < TREND_MIN_SECONDS) {
+            continue;
+        }
+        const time_t miss = span > TREND_SPAN_SECONDS ? span - TREND_SPAN_SECONDS
+                                                      : TREND_SPAN_SECONDS - span;
+        if (best < 0 || miss < best_miss) {
+            best = i;
+            best_miss = miss;
+        }
+    }
+    if (best < 0) {
+        return WEATHER_UNKNOWN;
+    }
+
+    const time_t span = now - s_pressure[best].at;
+    const int delta = s_pressure[newest].tenths - s_pressure[best].tenths;
+    return (int)((int64_t)delta * TREND_SPAN_SECONDS / span);
+}
+
 /* Reads the latest observation, trying each station in turn.
  *
  * Nearest first, and the first usable answer wins — usable meaning it parsed,
@@ -748,6 +879,7 @@ static esp_err_t poll_observation(void)
     const time_t now = time(NULL);
     esp_err_t err = ESP_ERR_NOT_FOUND;
     weather_obs_t parsed = {0};
+    int tenths = WEATHER_UNKNOWN;
 
     for (int i = 0; i < WEATHER_STATION_COUNT && stations[i][0] != '\0'; i++) {
         char url[URL_MAX];
@@ -757,7 +889,7 @@ static esp_err_t poll_observation(void)
 
         err = fetch(url, body, OBSERVATION_MAX);
         if (err == ESP_OK) {
-            err = parse_observation(body, &parsed);
+            err = parse_observation(body, &parsed, &tenths);
         }
         if (err == ESP_OK && now - parsed.observed > OBS_STALE_SECONDS) {
             ESP_LOGD(TAG, "%s is %lld min stale", stations[i],
@@ -771,6 +903,14 @@ static esp_err_t poll_observation(void)
         ESP_LOGD(TAG, "%s unusable: %s", stations[i], esp_err_to_name(err));
     }
     free(body);
+
+    /* Recorded only for the station the loop settled on, and only once it is
+     * known which that was — a reading from a station that was then rejected as
+     * stale has no business in the history. */
+    if (err == ESP_OK) {
+        record_pressure(parsed.station, parsed.observed, tenths);
+        parsed.pressure_trend = pressure_trend();
+    }
 
     portENTER_CRITICAL(&s_lock);
     if (err == ESP_OK) {
@@ -993,6 +1133,13 @@ esp_err_t weather_location_set(double lat, double lon)
         for (int i = 0; i < WEATHER_STATION_COUNT; i++) {
             s_stations[i][0] = '\0';
         }
+        /* Not strictly needed — record_pressure discards the history when the
+         * station changes, and a new location means a new station. Done here
+         * anyway so the state a location change leaves behind is stated in one
+         * place rather than deduced from a rule two functions away. */
+        s_pressure_count = 0;
+        s_pressure_next = 0;
+        s_pressure_station[0] = '\0';
         portENTER_CRITICAL(&s_lock);
         s_report.fetched = 0;
         /* The forecast schedule belongs to the old coordinates too. Without

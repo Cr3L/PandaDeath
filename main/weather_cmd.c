@@ -138,7 +138,26 @@ static int cmd_obs(int argc, char **argv)
     print_reading("feels like", obs.feels_like, "F");
     print_reading("dewpoint", obs.dewpoint, "F");
     print_reading("humidity", obs.humidity, "%");
-    print_reading("pressure", obs.pressure, "mb");
+    /* Pressure and its trend on one line, because the number alone is inert.
+     * The words are the ones a barometer face has carried for two centuries;
+     * the thresholds are the marine convention — half a millibar over three
+     * hours is instrument noise, three is the fall that precedes weather. */
+    if (obs.pressure == WEATHER_UNKNOWN) {
+        printf("  %-12s --\n", "pressure");
+    } else if (obs.pressure_trend == WEATHER_UNKNOWN) {
+        printf("  %-12s %d mb (trend needs more readings)\n", "pressure", obs.pressure);
+    } else {
+        const int t = obs.pressure_trend;
+        const int magnitude = t < 0 ? -t : t;
+        const char *word = magnitude < 5  ? "steady"
+                         : magnitude >= 30 ? (t < 0 ? "falling fast" : "rising fast")
+                         :                   (t < 0 ? "falling" : "rising");
+        /* The sign is printed, not derived from the integer part: a fall of
+         * three tenths has an integer part of zero, and %+d on that gives "+0.3"
+         * for a barometer that is going down. */
+        printf("  %-12s %d mb, %s (%c%d.%d mb/3h)\n", "pressure", obs.pressure,
+               word, t < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
+    }
 
     if (obs.wind == WEATHER_UNKNOWN) {
         printf("  %-12s --\n", "wind");
