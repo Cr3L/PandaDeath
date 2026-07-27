@@ -18,7 +18,12 @@
  * a red-orange shared a red channel exactly and read as one colour. */
 #define COLOR_CALM     UI_COLOR_ACCENT  /* the device green: nothing coming */
 #define COLOR_POSSIBLE 0xFFC400  /* yellow: storms mentioned, low probability */
-#define COLOR_LIKELY   0xFF8A00  /* orange: storms mentioned, high probability */
+/* Pushed further from yellow after judging both on the glass: at 0xFF8A00 the
+ * two were tellable apart but not at a glance, which is the only way this gets
+ * read. All three storm colours hold red at full and separate on green —
+ * 196, 109, 23 — so the progression is one channel walking down, and each step
+ * is large enough to survive the panel and the room. */
+#define COLOR_LIKELY   0xFF6D00  /* deep orange: storms mentioned, high probability */
 #define COLOR_NOW      0xFF1744  /* crimson: it is happening in this period */
 #define COLOR_TRACK    UI_COLOR_TRACK
 #define COLOR_DIM      0x7E9488  /* secondary text */
