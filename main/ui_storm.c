@@ -81,8 +81,14 @@ static const char *const FACTS[] = {
 static lv_obj_t *s_arc;
 static lv_obj_t *s_clock;
 static lv_obj_t *s_temp;
+static lv_obj_t *s_alert;   /* the watch line, in the middle; usually hidden */
 static lv_obj_t *s_eta;
 static lv_obj_t *s_fact;
+
+/* Shown alone when a warning is active: everything else is hidden behind it.
+ * A warning means the weather is happening and near, and a screen that puts
+ * that beside a fact about lightning temperature has misjudged the moment. */
+static lv_obj_t *s_takeover;
 
 static uint32_t storm_color(weather_storm_t storm)
 {
@@ -159,9 +165,51 @@ static void format_eta(char *buf, size_t len, time_t starts_at, time_t now)
     }
 }
 
+/* Warnings take the screen; watches and advisories take a line.
+ *
+ * The split is the issuing forecaster's, not one invented here: a Warning means
+ * it is happening, a Watch means conditions are favourable hours out. Taking
+ * over for a watch would make takeover common, and a takeover that happens
+ * often is one that gets ignored. */
+static bool alert_takes_over(const weather_alert_t *a)
+{
+    return a->level == WEATHER_ALERT_WARNING && a->severe;
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    weather_alert_t alert;
+    weather_alert_copy(&alert);
+
+    const bool takeover = alert_takes_over(&alert);
+    lv_obj_t *const hidden[] = { s_arc, s_clock, s_temp, s_alert, s_eta, s_fact };
+    for (size_t i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {
+        if (takeover) {
+            lv_obj_add_flag(hidden[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(hidden[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (takeover) {
+        lv_obj_remove_flag(s_takeover, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_takeover, alert.event);
+        return;  /* nothing below is visible; do not spend the redraw */
+    }
+    lv_obj_add_flag(s_takeover, LV_OBJ_FLAG_HIDDEN);
+
+    /* Watches and advisories sit where the conditions line used to, which is
+     * blank on an ordinary day — so anything appearing there means something. */
+    if (alert.level == WEATHER_ALERT_NONE) {
+        lv_label_set_text(s_alert, "");
+    } else {
+        lv_label_set_text(s_alert, alert.event);
+        lv_obj_set_style_text_color(s_alert,
+                                    lv_color_hex(alert.level == WEATHER_ALERT_WATCH
+                                                 ? COLOR_LIKELY : COLOR_DIM),
+                                    LV_PART_MAIN);
+    }
 
     /* A snapshot, not the live struct: the poll task can rewrite it at any
      * moment, and half of one report beside half of another is a forecast that
@@ -280,13 +328,31 @@ void ui_storm_screen_build(void)
     lv_obj_set_style_text_font(s_temp, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_obj_align(s_temp, LV_ALIGN_CENTER, 0, -32);
 
+    s_alert = lv_label_create(scr);
+    lv_label_set_long_mode(s_alert, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_alert, TEXT_WIDTH);
+    lv_obj_set_style_text_align(s_alert, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(s_alert, "");
+    lv_obj_set_style_text_color(s_alert, lv_color_hex(COLOR_LIKELY), LV_PART_MAIN);
+    lv_obj_align(s_alert, LV_ALIGN_CENTER, 0, -8);
+
+    s_takeover = lv_label_create(scr);
+    lv_label_set_long_mode(s_takeover, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_takeover, TEXT_WIDTH);
+    lv_obj_set_style_text_align(s_takeover, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(s_takeover, "");
+    lv_obj_set_style_text_color(s_takeover, lv_color_hex(COLOR_NOW), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_takeover, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_center(s_takeover);
+    lv_obj_add_flag(s_takeover, LV_OBJ_FLAG_HIDDEN);
+
     s_eta = lv_label_create(scr);
     lv_label_set_long_mode(s_eta, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_eta, TEXT_WIDTH);
     lv_obj_set_style_text_align(s_eta, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(s_eta, "");
     lv_obj_set_style_text_color(s_eta, lv_color_hex(COLOR_CALM), LV_PART_MAIN);
-    lv_obj_align(s_eta, LV_ALIGN_CENTER, 0, 6);
+    lv_obj_align(s_eta, LV_ALIGN_CENTER, 0, 16);
 
     s_fact = lv_label_create(scr);
     lv_label_set_long_mode(s_fact, LV_LABEL_LONG_WRAP);

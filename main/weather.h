@@ -69,8 +69,40 @@ typedef struct {
     char now[64];               /* current period's shortForecast */
 } weather_report_t;
 
+/* How serious an active alert is, taken from the event's own name rather than
+ * from the severity field. NWS names are a controlled vocabulary ending in
+ * Warning, Watch, Advisory or Statement, and that ending is what the issuing
+ * meteorologist chose to mean "happening" versus "possible" — severity is a
+ * separate axis that rates heat advisories as Moderate alongside them. */
+typedef enum {
+    WEATHER_ALERT_NONE,
+    WEATHER_ALERT_ADVISORY,  /* advisories and statements: information */
+    WEATHER_ALERT_WATCH,     /* conditions are favourable, hours out */
+    WEATHER_ALERT_WARNING,   /* it is happening, and near */
+} weather_alert_level_t;
+
+const char *weather_alert_level_name(weather_alert_level_t level);
+
+typedef struct {
+    weather_alert_level_t level;
+    char event[48];    /* "Severe Thunderstorm Warning", verbatim */
+    bool severe;       /* the API's own severity is Extreme or Severe */
+    time_t checked;    /* when the alert feed was last read; 0 for never */
+} weather_alert_t;
+
+/* The most serious alert covering the stored coordinates.
+ *
+ * Only the worst one is kept. A point under three simultaneous alerts is not
+ * three times as interesting, and a 240 px circle has room to say one thing. */
+void weather_alert_copy(weather_alert_t *out);
+
 /* Starts the poll task. Returns immediately; the first report arrives once
- * there is an address and a synced clock. */
+ * there is an address and a synced clock.
+ *
+ * The task polls two feeds on different clocks: the forecast every half hour,
+ * because that is how often it is reissued, and alerts every few minutes,
+ * because an alert that arrives twenty-five minutes late has missed its
+ * purpose. */
 esp_err_t weather_start(void);
 
 /* Asks the poll task to fetch now, and returns without waiting.

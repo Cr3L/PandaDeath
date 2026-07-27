@@ -10,6 +10,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "net.h"
@@ -72,7 +73,23 @@ static const char *TAG = "weather";
  * room to spare. */
 #define URL_MAX 160
 
+/* Alerts are checked far more often than the forecast. One arriving half an
+ * hour late has missed the weather it was warning about; a forecast has not. */
+#define ALERT_INTERVAL_MS (5 * 60 * 1000)
+
+/* A point query returns only alerts covering that one coordinate — typically
+ * none, occasionally two or three — and each runs about 6 kB because the
+ * description text is long. Four will not fit, and that is handled: the fetch
+ * refuses an oversized response and the previous alert stands.
+ *
+ * Note there is no way to ask for fewer. The API has no `limit` parameter; a
+ * request carrying one is answered with a 400 whose body is small enough to
+ * look like an empty result, which is exactly how it was nearly mistaken for a
+ * working filter. */
+#define ALERT_MAX 24576
+
 static weather_report_t s_report;
+static weather_alert_t s_alert;
 static TaskHandle_t s_task;
 
 /* Guards s_report. The poll task writes it whole, and the screen reads it
@@ -85,10 +102,26 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
  * asking every two seconds forever. */
 static int s_not_ready_polls;
 
+/* Uptime of the last successful forecast, 0 for never. Uptime rather than wall
+ * clock because it is only ever used as a difference, and it cannot jump when
+ * SNTP steps the clock — which it does, by decades, on the first sync. */
+static int64_t s_last_forecast_ms;
+
 /* The grid square the coordinates fall in never moves, so the /points lookup
  * that derives it is made once and its answer kept. Cleared when the location
  * changes, which is what makes weather_location_set() take effect. */
 static char s_forecast_url[URL_MAX];
+
+const char *weather_alert_level_name(weather_alert_level_t level)
+{
+    switch (level) {
+    case WEATHER_ALERT_NONE:     return "none";
+    case WEATHER_ALERT_ADVISORY: return "advisory";
+    case WEATHER_ALERT_WATCH:    return "watch";
+    case WEATHER_ALERT_WARNING:  return "warning";
+    }
+    return "unknown";
+}
 
 const char *weather_storm_name(weather_storm_t storm)
 {
@@ -362,6 +395,91 @@ done:
     return err;
 }
 
+/* Classifies from the event name's last word. NWS names are a controlled
+ * vocabulary — "Severe Thunderstorm Warning", "Tornado Watch", "Heat Advisory",
+ * "Special Weather Statement" — and that final word is the issuing forecaster's
+ * own statement of whether the thing is happening or merely possible. */
+static weather_alert_level_t classify_alert(const char *event)
+{
+    if (event == NULL) {
+        return WEATHER_ALERT_NONE;
+    }
+    if (strcasestr(event, "Warning") != NULL) {
+        return WEATHER_ALERT_WARNING;
+    }
+    if (strcasestr(event, "Watch") != NULL) {
+        return WEATHER_ALERT_WATCH;
+    }
+    return WEATHER_ALERT_ADVISORY;
+}
+
+static esp_err_t parse_alerts(const char *body, weather_alert_t *out)
+{
+    cJSON *root = cJSON_Parse(body);
+    ESP_RETURN_ON_FALSE(root != NULL, ESP_ERR_INVALID_RESPONSE, TAG, "alerts json");
+
+    weather_alert_t worst = { 0 };
+    worst.level = WEATHER_ALERT_NONE;
+
+    /* An error document has no features array, which is also what a quiet sky
+     * looks like — so this cannot distinguish them and does not try. The fetch
+     * has already rejected a non-200, which is where a bad request is caught. */
+    const cJSON *features = cJSON_GetObjectItemCaseSensitive(root, "features");
+    const cJSON *feature = NULL;
+    cJSON_ArrayForEach(feature, features) {
+        const cJSON *props = cJSON_GetObjectItemCaseSensitive(feature, "properties");
+        const cJSON *event = cJSON_GetObjectItemCaseSensitive(props, "event");
+        if (!cJSON_IsString(event) || event->valuestring == NULL) {
+            continue;
+        }
+
+        const weather_alert_level_t level = classify_alert(event->valuestring);
+        if (level <= worst.level) {
+            continue;  /* keep the most serious one only */
+        }
+
+        worst.level = level;
+        strlcpy(worst.event, event->valuestring, sizeof(worst.event));
+
+        const cJSON *severity = cJSON_GetObjectItemCaseSensitive(props, "severity");
+        worst.severe = cJSON_IsString(severity) && severity->valuestring != NULL &&
+                       (strcmp(severity->valuestring, "Extreme") == 0 ||
+                        strcmp(severity->valuestring, "Severe") == 0);
+    }
+
+    worst.checked = time(NULL);
+    *out = worst;
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t poll_alerts(void)
+{
+    double lat, lon;
+    ESP_RETURN_ON_ERROR(weather_location_get(&lat, &lon), TAG, "no location");
+
+    char url[URL_MAX];
+    snprintf(url, sizeof(url),
+             "https://api.weather.gov/alerts/active?point=%.4f,%.4f", lat, lon);
+
+    char *body = malloc(ALERT_MAX);
+    ESP_RETURN_ON_FALSE(body != NULL, ESP_ERR_NO_MEM, TAG, "no memory");
+
+    weather_alert_t parsed;
+    esp_err_t err = fetch(url, body, ALERT_MAX);
+    if (err == ESP_OK) {
+        err = parse_alerts(body, &parsed);
+    }
+    free(body);
+
+    if (err == ESP_OK) {
+        portENTER_CRITICAL(&s_lock);
+        s_alert = parsed;
+        portEXIT_CRITICAL(&s_lock);
+    }
+    return err;
+}
+
 static esp_err_t poll_once(void)
 {
     if (s_forecast_url[0] == '\0') {
@@ -412,20 +530,44 @@ static void weather_task(void *arg)
             s_not_ready_polls++;
         } else {
             s_not_ready_polls = 0;
-            esp_err_t err = poll_once();
+            wait_ms = ALERT_INTERVAL_MS;
+
+            /* Alerts every wake; the forecast only when its own interval is up.
+             * Tracked by elapsed time rather than by counting wakes, because a
+             * refresh asked for at the console resets neither schedule and
+             * would otherwise pull the forecast along with it. */
+            const int64_t now_ms = esp_timer_get_time() / 1000;
+            int64_t last_forecast;
             portENTER_CRITICAL(&s_lock);
-            s_report.last_error = err;
+            last_forecast = s_last_forecast_ms;
             portEXIT_CRITICAL(&s_lock);
+
+            esp_err_t err = poll_alerts();
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "poll failed: %s", esp_err_to_name(err));
-                /* The previous report is left standing. Stale weather with a
-                 * timestamp beside it is more use than no weather, and the
-                 * console prints how old it is. */
-                wait_ms = RETRY_INTERVAL_MS;
-            } else {
-                ESP_LOGI(TAG, "%d%s %s; storm %s",
-                         s_report.temperature, s_report.temperature_unit,
-                         s_report.now, weather_storm_name(s_report.storm));
+                ESP_LOGW(TAG, "alert poll failed: %s", esp_err_to_name(err));
+            } else if (s_alert.level != WEATHER_ALERT_NONE) {
+                ESP_LOGW(TAG, "active: %s", s_alert.event);
+            }
+
+            if (last_forecast == 0 || now_ms - last_forecast >= POLL_INTERVAL_MS) {
+                err = poll_once();
+                portENTER_CRITICAL(&s_lock);
+                s_report.last_error = err;
+                portEXIT_CRITICAL(&s_lock);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "poll failed: %s", esp_err_to_name(err));
+                    /* The previous report is left standing. Stale weather with
+                     * a timestamp beside it is more use than no weather, and
+                     * the console prints how old it is. */
+                    wait_ms = RETRY_INTERVAL_MS;
+                } else {
+                    portENTER_CRITICAL(&s_lock);
+                    s_last_forecast_ms = now_ms;
+                    portEXIT_CRITICAL(&s_lock);
+                    ESP_LOGI(TAG, "%d%s %s; storm %s",
+                             s_report.temperature, s_report.temperature_unit,
+                             s_report.now, weather_storm_name(s_report.storm));
+                }
             }
         }
 
@@ -455,6 +597,13 @@ esp_err_t weather_refresh(void)
     ESP_RETURN_ON_FALSE(s_task != NULL, ESP_ERR_INVALID_STATE, TAG, "not started");
     xTaskNotifyGive(s_task);
     return ESP_OK;
+}
+
+void weather_alert_copy(weather_alert_t *out)
+{
+    portENTER_CRITICAL(&s_lock);
+    *out = s_alert;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 void weather_report_copy(weather_report_t *out)
@@ -491,6 +640,13 @@ esp_err_t weather_location_set(double lat, double lon)
         s_forecast_url[0] = '\0';
         portENTER_CRITICAL(&s_lock);
         s_report.fetched = 0;
+        /* The forecast schedule belongs to the old coordinates too. Without
+         * this the task holds the timestamp of the last fetch and declines to
+         * make another for up to half an hour, leaving a board that has just
+         * been told where it is with no forecast and no plan to get one — the
+         * cached URL and the report were cleared, and the *timer* was not.
+         * Found by changing location twice in a row on hardware. */
+        s_last_forecast_ms = 0;
         portEXIT_CRITICAL(&s_lock);
     }
     return err;

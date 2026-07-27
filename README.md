@@ -42,6 +42,13 @@ Verified on hardware:
 - **The weather** — a twelve-hourly forecast from the US National Weather
   Service over TLS, reporting how close the next thunderstorm is. Coordinates
   are set at the console and stored in NVS.
+- **Severe weather alerts** — active NWS watches and warnings for those
+  coordinates. A *warning* takes over the whole screen in crimson; a *watch*
+  gets a line. Verified against a live Flood Warning in Texas by pointing the
+  board at it.
+- **The storm screen** — a rim dial whose fill is nearness times probability,
+  so it is dramatic only when a storm is both close and likely, with the
+  temperature, an ETA and a rotating thunderstorm fact.
 
 **The purpose is a storm watch.** The board knows where it is, what time it is,
 and whether a thunderstorm is coming — and shows none of it. The glass still
@@ -225,6 +232,10 @@ does not exist yet.
 | `weather` | the forecast, and how close a thunderstorm is |
 | `weather_refresh` | ask the weather task to fetch now |
 | `loc [<lat> <lon>]` | show or set the forecast location |
+
+Alerts are polled every five minutes and the forecast every thirty, on the same
+task. An alert half an hour late has missed the weather it was warning about; a
+forecast has not.
 
 For scripted use without a terminal:
 

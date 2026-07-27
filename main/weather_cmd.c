@@ -20,6 +20,18 @@ static int cmd_weather(int argc, char **argv)
     weather_report_copy(&report);
     const weather_report_t *r = &report;
 
+    /* Before the no-forecast branch, not after it. An alert is the one urgent
+     * thing this command can say, and it was briefly printed only once a
+     * forecast existed — so a live warning was hidden by the absence of the
+     * less important half. Found by pointing the board at a real warning. */
+    weather_alert_t alert;
+    weather_alert_copy(&alert);
+    if (alert.level != WEATHER_ALERT_NONE) {
+        printf("ALERT:   %s (%s%s)\n", alert.event,
+               weather_alert_level_name(alert.level),
+               alert.severe ? ", severe" : "");
+    }
+
     if (r->fetched == 0) {
         printf("no forecast yet\n");
         /* The three things that stop one arriving, in the order worth checking.
