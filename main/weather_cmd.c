@@ -79,6 +79,79 @@ static int cmd_weather(int argc, char **argv)
     return 0;
 }
 
+/* Prints an integer reading, or a dash where the station reported nothing.
+ * Every numeric field needs this: on a clear day the nearest test station sent
+ * four nulls alongside everything else, and a zero in their place would be a
+ * reading no instrument made. */
+static void print_reading(const char *label, int value, const char *unit)
+{
+    if (value == WEATHER_UNKNOWN) {
+        printf("  %-12s --\n", label);
+    } else {
+        printf("  %-12s %d %s\n", label, value, unit);
+    }
+}
+
+/* Degrees the wind blows from, as the compass point anyone would say out loud.
+ *
+ * Sixteen points of 22.5°, each name covering the arc *centred* on its bearing
+ * rather than starting at it — so north runs from 348.75° round to 11.25°,
+ * which is why the half-point offset is there. In integers that is
+ * (deg + 11.25) / 22.5 scaled by four to clear the fractions. */
+static const char *compass(int degrees)
+{
+    static const char *const POINTS[] = {
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+    };
+    const int index = ((degrees * 4 + 45) / 90) % 16;
+    return POINTS[index < 0 ? 0 : index];
+}
+
+static int cmd_obs(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    weather_obs_t obs;
+    weather_obs_copy(&obs);
+
+    if (obs.observed == 0) {
+        printf("no observation yet\n");
+        if (obs.last_error != ESP_OK) {
+            printf("        last attempt: %s\n", esp_err_to_name(obs.last_error));
+        }
+        return 0;
+    }
+
+    /* The station's own reading time, and its age. A station reporting hourly
+     * is up to an hour stale the moment it is read, which is normal — without
+     * the age beside it, a number that has not moved looks like a bug. */
+    const time_t now = time(NULL);
+    printf("station: %s, %lld min ago\n", obs.station,
+           (long long)((now - obs.observed) / 60));
+    if (obs.text[0] != '\0') {
+        printf("  %-12s %s\n", "conditions", obs.text);
+    }
+
+    print_reading("temperature", obs.temperature, "F");
+    print_reading("feels like", obs.feels_like, "F");
+    print_reading("dewpoint", obs.dewpoint, "F");
+    print_reading("humidity", obs.humidity, "%");
+    print_reading("pressure", obs.pressure, "mb");
+
+    if (obs.wind == WEATHER_UNKNOWN) {
+        printf("  %-12s --\n", "wind");
+    } else if (obs.wind_direction == WEATHER_UNKNOWN) {
+        printf("  %-12s %d mph\n", "wind", obs.wind);
+    } else {
+        printf("  %-12s %s %d mph\n", "wind", compass(obs.wind_direction), obs.wind);
+    }
+    print_reading("gusts", obs.gust, "mph");
+    print_reading("visibility", obs.visibility, "mi");
+    return 0;
+}
+
 static int cmd_weather_refresh(int argc, char **argv)
 {
     (void)argc;
@@ -163,6 +236,11 @@ static const esp_console_cmd_t COMMANDS[] = {
         .command = "weather",
         .help = "Show the last forecast and how close a thunderstorm is",
         .func = cmd_weather,
+    },
+    {
+        .command = "obs",
+        .help = "Show the latest reading from the nearest station",
+        .func = cmd_obs,
     },
     {
         .command = "weather_refresh",

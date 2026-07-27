@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits.h>
 #include <stdbool.h>
 #include <time.h>
 
@@ -92,10 +93,15 @@ typedef struct {
 
 /* Nearby observation stations, nearest first.
  *
- * Three, not one. The nearest station is not always the best equipped — the
- * closest to the test coordinates reports no wind gust, no sea-level pressure
- * and no three-hour precipitation on an ordinary clear day — so a reading
- * missing from the first can be sought from the next.
+ * Three, not one. A station can be unreachable, or can go hours between
+ * reports, and neither is rare enough to leave the screen blank for — so the
+ * next one along is tried.
+ *
+ * The fallback is whole-observation, not per-field. Filling a missing gust from
+ * a station 20 km away would produce a reading no station ever made, labelled
+ * with a place it did not come from; a blank field is the honest answer and the
+ * station's name is printed beside the numbers so it is clear whose reading it
+ * is.
  *
  * The list they come from is 75 kB, which does not fit anywhere on this chip,
  * and only its head is wanted. It is read as a prefix and scanned as text; that
@@ -110,6 +116,53 @@ typedef struct {
 /* Copies the resolved station identifiers. Entries are empty strings until the
  * first successful poll, and beyond however many were found. */
 void weather_stations_copy(char out[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX]);
+
+/* A reading the station did not report.
+ *
+ * Every numeric field needs one, because these arrive null individually rather
+ * than as a missing document: on an ordinary clear day the nearest test station
+ * reported no gust, no wind chill, no sea-level pressure and no three-hour
+ * precipitation, while reporting everything else. Zero is not available as a
+ * sentinel — 0 °F, 0 mph and 0% are all real readings — so it is a value no
+ * instrument can produce. */
+#define WEATHER_UNKNOWN INT_MIN
+
+/* The latest observation from a real instrument, as opposed to the forecast.
+ *
+ * Converted to US customary units at parse time. The observations endpoint
+ * reports SI (°C, Pa, km/h) while the forecast reports °F, and leaving both in
+ * their source units would put the conversion in every consumer and let the two
+ * halves of one screen disagree about what a temperature is.
+ *
+ * Rounded to integers because a 240 px circle cannot show a decimal place worth
+ * having, and because the underlying instruments do not justify one — the
+ * humidity in a live response came back as 65.564318547283 percent. */
+typedef struct {
+    /* Which station this came from, and when the station made the reading —
+     * not when we fetched it. The distinction matters: a station reporting
+     * hourly is up to an hour stale the moment it is collected, and that is
+     * normal rather than a fault. 0 for never. */
+    char station[WEATHER_STATION_ID_MAX];
+    time_t observed;
+
+    esp_err_t last_error;   /* why the last attempt failed, ESP_OK if it did not */
+
+    int temperature;        /* °F */
+    int dewpoint;           /* °F */
+    int feels_like;         /* °F: heat index or wind chill, whichever applies */
+    int humidity;           /* percent */
+    int pressure;           /* millibars — the meteorological unit, and the one
+                             * a falling-barometer rule of thumb is quoted in */
+    int wind;               /* mph */
+    int gust;               /* mph; usually unknown, which is itself the signal */
+    int wind_direction;     /* degrees the wind blows *from*, 0..359 */
+    int visibility;         /* miles */
+    char text[32];          /* the station's own words: "Clear", "Thunderstorm" */
+} weather_obs_t;
+
+/* A consistent snapshot, same discipline as weather_report_copy. `observed` is
+ * 0 until a reading has arrived. */
+void weather_obs_copy(weather_obs_t *out);
 
 /* The most serious alert covering the stored coordinates.
  *

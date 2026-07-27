@@ -1,5 +1,6 @@
 #include "weather.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,6 +91,22 @@ static const char *TAG = "weather";
  * picking among the closest few, which is all this does. */
 #define STATIONS_MAX 8192
 
+/* One observation is 4.3 kB — small enough that the buffer is not the
+ * interesting constraint, sized with the same headroom as the others. */
+#define OBSERVATION_MAX 8192
+
+/* Stations report about hourly, so polling faster buys nothing from any one
+ * reading. It is not set to an hour because the pressure history is built from
+ * these and a board that has just booted would otherwise wait an hour for its
+ * first sample. Over-polling is harmless: a reading is only recorded when the
+ * station's own timestamp has moved. */
+#define OBS_INTERVAL_MS (15 * 60 * 1000)
+
+/* Older than this and the station is treated as not reporting, and the next one
+ * along is tried. Two hours is past the point where a station that claims to
+ * report hourly has plainly stopped, while still tolerating one missed cycle. */
+#define OBS_STALE_SECONDS (2 * 60 * 60)
+
 /* Alerts are checked far more often than the forecast. One arriving half an
  * hour late has missed the weather it was warning about; a forecast has not. */
 #define ALERT_INTERVAL_MS (5 * 60 * 1000)
@@ -107,6 +124,7 @@ static const char *TAG = "weather";
 
 static weather_report_t s_report;
 static weather_alert_t s_alert;
+static weather_obs_t s_obs;
 static TaskHandle_t s_task;
 
 /* Guards s_report. The poll task writes it whole, and the screen reads it
@@ -123,6 +141,7 @@ static int s_not_ready_polls;
  * clock because it is only ever used as a difference, and it cannot jump when
  * SNTP steps the clock — which it does, by decades, on the first sync. */
 static int64_t s_last_forecast_ms;
+static int64_t s_last_obs_ms;
 
 /* The grid square the coordinates fall in never moves, so the /points lookup
  * that derives it is made once and its answer kept. Cleared when the location
@@ -527,6 +546,104 @@ done:
     return err;
 }
 
+/* Reads one observation field.
+ *
+ * Each is an object of its own — {"value": 27, "unitCode": "wmoUnit:degC"} —
+ * and a station that does not measure something still sends the object, with a
+ * null value. So "absent" and "present but null" both mean the same thing here,
+ * and both have to be caught: cJSON_IsNumber is false for null, which is what
+ * makes one test enough. */
+static double obs_value(const cJSON *props, const char *name, bool *ok)
+{
+    const cJSON *field = cJSON_GetObjectItemCaseSensitive(props, name);
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(field, "value");
+    if (!cJSON_IsNumber(value)) {
+        *ok = false;
+        return 0.0;
+    }
+    *ok = true;
+    return value->valuedouble;
+}
+
+/* The conversions, each applied once, here. lround rather than a cast so that
+ * -0.4 °C becomes 0 °F rather than truncating toward zero on one side of the
+ * scale and not the other. */
+static int obs_int(const cJSON *props, const char *name, double scale, double offset)
+{
+    bool ok = false;
+    const double v = obs_value(props, name, &ok);
+    return ok ? (int)lround(v * scale + offset) : WEATHER_UNKNOWN;
+}
+
+#define C_TO_F_SCALE  1.8
+#define C_TO_F_OFFSET 32.0
+#define PA_TO_MB      0.01
+#define KMH_TO_MPH    0.621371
+#define M_TO_MILES    (1.0 / 1609.344)
+
+static esp_err_t parse_observation(const char *body, weather_obs_t *out)
+{
+    cJSON *root = cJSON_Parse(body);
+    ESP_RETURN_ON_FALSE(root != NULL, ESP_ERR_INVALID_RESPONSE, TAG, "obs json");
+
+    esp_err_t err = ESP_ERR_INVALID_RESPONSE;
+    const cJSON *props = cJSON_GetObjectItemCaseSensitive(root, "properties");
+    if (!cJSON_IsObject(props)) {
+        goto done;
+    }
+
+    weather_obs_t o = {0};
+
+    const cJSON *stamp = cJSON_GetObjectItemCaseSensitive(props, "timestamp");
+    if (!cJSON_IsString(stamp) || stamp->valuestring == NULL) {
+        goto done;
+    }
+    o.observed = parse_iso8601(stamp->valuestring);
+    if (o.observed == 0) {
+        goto done;
+    }
+
+    o.temperature    = obs_int(props, "temperature", C_TO_F_SCALE, C_TO_F_OFFSET);
+    o.dewpoint       = obs_int(props, "dewpoint", C_TO_F_SCALE, C_TO_F_OFFSET);
+    o.humidity       = obs_int(props, "relativeHumidity", 1.0, 0.0);
+    o.pressure       = obs_int(props, "barometricPressure", PA_TO_MB, 0.0);
+    o.wind           = obs_int(props, "windSpeed", KMH_TO_MPH, 0.0);
+    o.gust           = obs_int(props, "windGust", KMH_TO_MPH, 0.0);
+    o.wind_direction = obs_int(props, "windDirection", 1.0, 0.0);
+    o.visibility     = obs_int(props, "visibility", M_TO_MILES, 0.0);
+
+    /* One field, because they are the same question. Only one of the two is
+     * ever reported — heat index above about 80 °F, wind chill below 50 — and
+     * showing "feels like" is more use than showing which formula produced it.
+     * Falls back to the measured temperature so the field is blank only when
+     * the temperature itself is. */
+    const int heat = obs_int(props, "heatIndex", C_TO_F_SCALE, C_TO_F_OFFSET);
+    const int chill = obs_int(props, "windChill", C_TO_F_SCALE, C_TO_F_OFFSET);
+    o.feels_like = (heat != WEATHER_UNKNOWN) ? heat
+                 : (chill != WEATHER_UNKNOWN) ? chill
+                 : o.temperature;
+
+    const cJSON *text = cJSON_GetObjectItemCaseSensitive(props, "textDescription");
+    if (cJSON_IsString(text) && text->valuestring != NULL) {
+        strlcpy(o.text, text->valuestring, sizeof(o.text));
+    }
+
+    /* A document with a timestamp and no temperature is a station that is
+     * powered but not measuring. Treated as a failure so the next station is
+     * tried, rather than published as a reading with nothing in it. */
+    if (o.temperature == WEATHER_UNKNOWN) {
+        err = ESP_ERR_NOT_FOUND;
+        goto done;
+    }
+
+    *out = o;
+    err = ESP_OK;
+
+done:
+    cJSON_Delete(root);
+    return err;
+}
+
 /* Classifies from the event name's last word. NWS names are a controlled
  * vocabulary — "Severe Thunderstorm Warning", "Tornado Watch", "Heat Advisory",
  * "Special Weather Statement" — and that final word is the issuing forecaster's
@@ -612,6 +729,60 @@ static esp_err_t poll_alerts(void)
     return err;
 }
 
+/* Reads the latest observation, trying each station in turn.
+ *
+ * Nearest first, and the first usable answer wins — usable meaning it parsed,
+ * carries a temperature, and is recent. A station that is merely quiet today is
+ * indistinguishable from one that is broken, and neither is worth the screen
+ * going blank over when there is another a few miles away. */
+static esp_err_t poll_observation(void)
+{
+    char stations[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX];
+    weather_stations_copy(stations);
+    ESP_RETURN_ON_FALSE(stations[0][0] != '\0', ESP_ERR_INVALID_STATE,
+                        TAG, "no stations");
+
+    char *body = malloc(OBSERVATION_MAX);
+    ESP_RETURN_ON_FALSE(body != NULL, ESP_ERR_NO_MEM, TAG, "no memory");
+
+    const time_t now = time(NULL);
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    weather_obs_t parsed = {0};
+
+    for (int i = 0; i < WEATHER_STATION_COUNT && stations[i][0] != '\0'; i++) {
+        char url[URL_MAX];
+        snprintf(url, sizeof(url),
+                 "https://api.weather.gov/stations/%s/observations/latest",
+                 stations[i]);
+
+        err = fetch(url, body, OBSERVATION_MAX);
+        if (err == ESP_OK) {
+            err = parse_observation(body, &parsed);
+        }
+        if (err == ESP_OK && now - parsed.observed > OBS_STALE_SECONDS) {
+            ESP_LOGD(TAG, "%s is %lld min stale", stations[i],
+                     (long long)((now - parsed.observed) / 60));
+            err = ESP_ERR_TIMEOUT;
+        }
+        if (err == ESP_OK) {
+            strlcpy(parsed.station, stations[i], sizeof(parsed.station));
+            break;
+        }
+        ESP_LOGD(TAG, "%s unusable: %s", stations[i], esp_err_to_name(err));
+    }
+    free(body);
+
+    portENTER_CRITICAL(&s_lock);
+    if (err == ESP_OK) {
+        s_obs = parsed;
+    }
+    /* Recorded either way, and on the live object rather than the parsed one,
+     * so a run where every station failed still says why. */
+    s_obs.last_error = err;
+    portEXIT_CRITICAL(&s_lock);
+    return err;
+}
+
 static esp_err_t poll_once(void)
 {
     if (s_forecast_url[0] == '\0') {
@@ -648,6 +819,15 @@ static esp_err_t poll_once(void)
     return err;
 }
 
+/* Whether a schedule tracked by uptime has come round, 0 meaning never run.
+ * Shared by the forecast and the observation, which differ only in their
+ * interval — the second one arriving is what turned this from an inline
+ * comparison into something worth naming. */
+static bool due(int64_t last_ms, int64_t now_ms, int64_t interval_ms)
+{
+    return last_ms == 0 || now_ms - last_ms >= interval_ms;
+}
+
 static void weather_task(void *arg)
 {
     (void)arg;
@@ -675,9 +855,10 @@ static void weather_task(void *arg)
              * refresh asked for at the console resets neither schedule and
              * would otherwise pull the forecast along with it. */
             const int64_t now_ms = esp_timer_get_time() / 1000;
-            int64_t last_forecast;
+            int64_t last_forecast, last_obs;
             portENTER_CRITICAL(&s_lock);
             last_forecast = s_last_forecast_ms;
+            last_obs = s_last_obs_ms;
             portEXIT_CRITICAL(&s_lock);
 
             esp_err_t err = poll_alerts();
@@ -687,7 +868,7 @@ static void weather_task(void *arg)
                 ESP_LOGW(TAG, "active: %s", s_alert.event);
             }
 
-            if (last_forecast == 0 || now_ms - last_forecast >= POLL_INTERVAL_MS) {
+            if (due(last_forecast, now_ms, POLL_INTERVAL_MS)) {
                 err = poll_once();
                 portENTER_CRITICAL(&s_lock);
                 s_report.last_error = err;
@@ -705,6 +886,24 @@ static void weather_task(void *arg)
                     ESP_LOGI(TAG, "%d%s %s; storm %s",
                              s_report.temperature, s_report.temperature_unit,
                              s_report.now, weather_storm_name(s_report.storm));
+                }
+            }
+
+            /* After the forecast, because the stations are resolved by the same
+             * /points lookup the forecast triggers — on a first boot this is
+             * what lets the first reading arrive on the same wake rather than
+             * fifteen minutes later. */
+            if (due(last_obs, now_ms, OBS_INTERVAL_MS)) {
+                err = poll_observation();
+                if (err != ESP_OK) {
+                    ESP_LOGD(TAG, "no observation: %s", esp_err_to_name(err));
+                } else {
+                    portENTER_CRITICAL(&s_lock);
+                    s_last_obs_ms = now_ms;
+                    portEXIT_CRITICAL(&s_lock);
+                    ESP_LOGI(TAG, "%s: %d F, dew %d, %d mb",
+                             s_obs.station, s_obs.temperature, s_obs.dewpoint,
+                             s_obs.pressure);
                 }
             }
         }
@@ -748,6 +947,13 @@ void weather_report_copy(weather_report_t *out)
 {
     portENTER_CRITICAL(&s_lock);
     *out = s_report;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void weather_obs_copy(weather_obs_t *out)
+{
+    portENTER_CRITICAL(&s_lock);
+    *out = s_obs;
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -796,6 +1002,10 @@ esp_err_t weather_location_set(double lat, double lon)
          * cached URL and the report were cleared, and the *timer* was not.
          * Found by changing location twice in a row on hardware. */
         s_last_forecast_ms = 0;
+        /* The observation belongs to the old coordinates as much as the
+         * forecast does, and its schedule with it. */
+        s_obs.observed = 0;
+        s_last_obs_ms = 0;
         portEXIT_CRITICAL(&s_lock);
     }
     return err;
