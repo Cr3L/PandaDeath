@@ -234,3 +234,31 @@ deliberately rather than as a side effect of one function needing twelve cases.
 The first one has now happened; a second means the pattern is real rather than
 an exception, and the harness above is the argument for what such a setup would
 have caught.
+
+## 14. A failed first SNTP sync is not retried promptly, and it stalls everything
+
+Seen once, on hardware, during this session. The board associated, obtained an
+address, and never set its clock: `time` reported "needs a connection" while
+`wifi_status` showed a live association at -36 dBm. The boot before it had
+logged `disconnected, reason 8` — the association dropped, and SNTP's first
+attempt went with it.
+
+That is worse than a missing clock. TLS rejects a certificate when the board
+thinks it is 1970, so the weather task waits on `time_sync_synced()` and never
+fetches: one silent failure at second four takes down the forecast, the alerts
+and the observations, and the console's own advice points at Wi-Fi, which is
+working.
+
+It cleared on the next reboot and has not recurred, which is exactly why it is
+written down rather than chased — a fault seen once and not reproduced is a note,
+not a bug hunt.
+
+**Why it waits:** the fix is not obvious. `time_sync.c` starts SNTP on
+`IP_EVENT_STA_GOT_IP`, which is the right trigger and fires again on a
+reconnect, so the case that failed here should have recovered on its own. Until
+it is understood whether the event did not fire, or fired and the sync still did
+not happen, any change is a guess dressed as a fix.
+
+**Trigger:** the second occurrence — or, sooner, a deliberate look at whether
+`esp_netif_sntp` retries a failed initial sync at all, which is a question the
+IDF source can answer without waiting for the fault.
