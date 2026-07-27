@@ -59,6 +59,16 @@ refused by the sandbox), and everything after it is agent-driven:
 cd ~/Desktop/Babel/PandaDeath/build && python3 -m http.server 8000
 ```
 
+**It outlives its tab too**, exactly like `idf.py monitor` — closing the
+terminal leaves it holding port 8000, and the next start dies with
+`OSError: [Errno 98] Address already in use`. That error means the server is
+already running, not that something is broken; it serves from disk per request,
+so it is already serving whatever was last built. Check before restarting:
+
+```sh
+curl -s -o /dev/null -w "%{size_download}\n" http://<fedora-ip>:8000/pandadeath.bin
+```
+
 ```sh
 python tools/console.py --timeout 180 "ota http://<fedora-ip>:8000/pandadeath.bin"
 python tools/console.py "ota_status"     # next: shows an update waiting

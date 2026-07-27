@@ -98,22 +98,7 @@ DRAM for the mapping.
 read-modify-write and WROVER PSRAM is roughly 10x slower, which would push
 render time past flush time.
 
-## 6. Stack smashing protection off — **the trigger has fired**
-
-**Why it waited:** it costs a little size and speed, and caught a bug class the
-code could not produce, because there was no parser.
-
-**Trigger, as written:** "the day an HTTP or JSON parser lands." That day was
-the OTA session — `esp_http_client` now parses headers and a chunked body from
-the network, on a task that also holds a flash writer.
-
-This is left as an open item rather than done silently only because turning it
-on changes every stack frame in the image and wants its own verification pass,
-not because the reason to wait still holds. It does not. This should be the
-first thing picked up next session: `CONFIG_COMPILER_STACK_CHECK_MODE_NORM`,
-then re-run the OTA matrix, which is now cheap to re-run.
-
-## 7. The initial black clear paints an invisible frame
+## 6. The initial black clear paints an invisible frame
 
 `display_init()` clears to black while the backlight is still at zero, costing
 ~23 ms and 115 kB of SPI at boot. It is also the only reason the 9.6 kB DMA
@@ -124,7 +109,7 @@ insurance against showing power-up noise if the fade ever moves earlier.
 
 **Trigger:** if boot latency ever matters, this is 23 ms sitting in plain sight.
 
-## 8. `CONFIG_FREERTOS_HZ=1000`
+## 7. `CONFIG_FREERTOS_HZ=1000`
 
 Buys 1 ms scheduling granularity that nothing currently needs — the LVGL tick is
 10 ms and the shortest delay in the tree is 30 ms. Costs ~900 timer interrupts a
@@ -135,7 +120,7 @@ later does want fine delays.
 
 **Trigger:** if the tick ISR shows up competing with Wi-Fi.
 
-## 9. Only one of `display_init()`'s six failure exits has executed
+## 8. Only one of `display_init()`'s six failure exits has executed
 
 The unwind was verified by injecting a failure at the last and most
 resource-heavy point, confirming on hardware that a second `display_init()`
@@ -148,7 +133,7 @@ in `ESP_ERROR_CHECK`.
 
 **Trigger:** the first caller that wants to survive a failed `display_init()`.
 
-## 10. OTA is plain HTTP
+## 9. OTA is plain HTTP
 
 `ota <url>` fetches over unencrypted HTTP, enabled deliberately with
 `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`. On a LAN, initiated by a human typing a URL
@@ -163,7 +148,7 @@ SNTP supplies one.
 **Trigger:** the first update that comes from anywhere but this LAN. Also worth
 doing sooner if the board is ever exposed to a network with guests on it.
 
-## 11. `built:` in `ota_status` does not track source changes
+## 10. `built:` in `ota_status` does not track source changes
 
 `esp_app_desc.c` is compiled once and not rebuilt when other sources change, so
 two images with different code can report the same build timestamp — observed

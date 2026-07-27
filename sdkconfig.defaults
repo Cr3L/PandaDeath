@@ -27,6 +27,22 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # is ~50 kB and would land in the same change as the feature being tested.
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 
+# Stack smashing protection. A guard value is written below the return address
+# on entry to a protected function and checked on exit; a buffer that ran past
+# its end halts the board instead of returning into whatever overwrote it.
+#
+# Off until the OTA session, on the stated grounds that the code had no parser
+# and so could not produce the bug class. esp_http_client now parses headers and
+# a body from the network, so that reason expired and this is the payment.
+#
+# NORM (-fstack-protector), not STRONG. NORM covers functions with buffers over
+# 8 bytes, which is every buffer in this tree that anything is copied into.
+# STRONG adds small arrays and frame-address references, for more stack per
+# protected frame — and the lwIP tcpip task, which runs the SNTP callback, was
+# measured with only ~1.4 kB spare of its 3072. Coverage that costs headroom on
+# the tightest stack in the image is not obviously a gain.
+CONFIG_COMPILER_STACK_CHECK_MODE_NORM=y
+
 # -Os, not IDF's default -Og. The LVGL software renderer's per-pixel work is
 # what sets frame time here, and the whole image is smaller for it. Debug builds
 # can still be had with menuconfig when a specific bug wants them.
