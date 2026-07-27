@@ -106,6 +106,22 @@ static int cmd_loc(int argc, char **argv)
             return 0;
         }
         printf("location: %.4f, %.4f\n", lat, lon);
+
+        /* The stations are derived from the coordinates and are the thing that
+         * says the derivation actually happened — an empty list here means the
+         * grid lookup has not run or could not read the list, which is
+         * otherwise only visible in the log. */
+        char stations[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX];
+        weather_stations_copy(stations);
+        if (stations[0][0] == '\0') {
+            printf("stations: not resolved yet\n");
+        } else {
+            printf("stations:");
+            for (int i = 0; i < WEATHER_STATION_COUNT && stations[i][0] != '\0'; i++) {
+                printf(" %s", stations[i]);
+            }
+            printf("\n");
+        }
         return 0;
     }
 

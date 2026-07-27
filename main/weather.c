@@ -73,6 +73,23 @@ static const char *TAG = "weather";
  * room to spare. */
 #define URL_MAX 160
 
+/* The station list is 75 kB and only its head is wanted, so it is read as a
+ * prefix and scanned as text — a truncated document is not JSON and cJSON
+ * cannot be asked to parse one.
+ *
+ * 8 kB because the identifiers sit about 1.3 kB apart: measured against the
+ * real response, the first is 2.0 kB in and the third 4.7 kB, so 4 kB would
+ * reach only two of them. The size is a property of the API's payload, not a
+ * round number.
+ *
+ * Ordering is what makes this work at all — the list is nearest-first. That is
+ * not stated in the API documentation, so it was measured: of the 53 stations
+ * returned for one grid square, the first 31 are in exact distance order and
+ * the first inversion is 130 km out and 300 m wide, which is the grid cell's
+ * centre differing from the coordinate rather than disorder. Reliable for
+ * picking among the closest few, which is all this does. */
+#define STATIONS_MAX 8192
+
 /* Alerts are checked far more often than the forecast. One arriving half an
  * hour late has missed the weather it was warning about; a forecast has not. */
 #define ALERT_INTERVAL_MS (5 * 60 * 1000)
@@ -109,8 +126,23 @@ static int64_t s_last_forecast_ms;
 
 /* The grid square the coordinates fall in never moves, so the /points lookup
  * that derives it is made once and its answer kept. Cleared when the location
- * changes, which is what makes weather_location_set() take effect. */
+ * changes, which is what makes weather_location_set() take effect.
+ *
+ * Both URLs come out of the same /points response, so resolving them together
+ * costs one request rather than two. The stations URL is a field in that
+ * document and is not derived from the forecast URL by editing its last path
+ * segment — those two strings look interchangeable and only one of them is
+ * promised by the API.
+ *
+ * RAM, not NVS. These are re-derived on every boot, which is a few kilobytes
+ * over a connection the board needs anyway, and it keeps the coordinates the
+ * single stored fact about where this thing is. */
 static char s_forecast_url[URL_MAX];
+static char s_stations_url[URL_MAX];
+
+/* Nearest observation stations, nearest first, empty strings for unresolved.
+ * Derived from s_stations_url and cleared alongside it. */
+static char s_stations[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX];
 
 const char *weather_alert_level_name(weather_alert_level_t level)
 {
@@ -136,8 +168,13 @@ const char *weather_storm_name(weather_storm_t storm)
 
 /* Fetches `url` into `buf`. Streams rather than using esp_http_client_perform,
  * because perform gives no way to refuse a response that is too large — it is
- * already in memory by the time anyone could ask. */
-static esp_err_t fetch(const char *url, char *buf, size_t len)
+ * already in memory by the time anyone could ask.
+ *
+ * `allow_partial` chooses what an oversized response means. For a document that
+ * will be handed to cJSON it is an error, because half a JSON document is not a
+ * smaller forecast but an invalid one. For a document only the head of is
+ * wanted it is the point: see resolve_stations(). */
+static esp_err_t fetch_bounded(const char *url, char *buf, size_t len, bool allow_partial)
 {
     esp_http_client_config_t cfg = {
         .url = url,
@@ -167,7 +204,7 @@ static esp_err_t fetch(const char *url, char *buf, size_t len)
     }
     /* A chunked response reports -1, which is not an error and not a length —
      * the read loop below bounds itself either way. */
-    if (content_length > 0 && (size_t)content_length >= len) {
+    if (!allow_partial && content_length > 0 && (size_t)content_length >= len) {
         ESP_LOGE(TAG, "response is %lld bytes, buffer is %u",
                  (long long)content_length, (unsigned)len);
         err = ESP_ERR_NO_MEM;
@@ -190,20 +227,43 @@ static esp_err_t fetch(const char *url, char *buf, size_t len)
 
     /* Ran to the end of the buffer with the connection still open, so the
      * document is longer than the space for it and what was read is a prefix. */
-    if (total >= len - 1) {
+    if (!allow_partial && total >= len - 1) {
         ESP_LOGE(TAG, "response exceeds %u bytes", (unsigned)len);
         err = ESP_ERR_NO_MEM;
         goto done;
     }
 
 done:
+    /* Closing with bytes still unread is how a prefix read stays cheap: the
+     * remainder of the document is never pulled over the air. */
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return err;
 }
 
-/* Resolves coordinates to the forecast URL for their grid square. */
-static esp_err_t resolve_forecast_url(char *buf, size_t len)
+static esp_err_t fetch(const char *url, char *buf, size_t len)
+{
+    return fetch_bounded(url, buf, len, false);
+}
+
+/* Copies a string field out of a JSON object, refusing one that would not fit
+ * rather than storing a truncated URL — which would fail later as a 404 and
+ * look like the service having moved. */
+static esp_err_t copy_string_field(const cJSON *obj, const char *name, char *buf, size_t len)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, name);
+    if (!cJSON_IsString(item) || item->valuestring == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (strlen(item->valuestring) >= len) {
+        return ESP_ERR_NO_MEM;
+    }
+    strlcpy(buf, item->valuestring, len);
+    return ESP_OK;
+}
+
+/* Resolves coordinates to the per-grid-square URLs, both from one response. */
+static esp_err_t resolve_grid(void)
 {
     double lat, lon;
     ESP_RETURN_ON_ERROR(weather_location_get(&lat, &lon), TAG, "no location");
@@ -224,20 +284,92 @@ static esp_err_t resolve_forecast_url(char *buf, size_t len)
     free(body);
     ESP_RETURN_ON_FALSE(root != NULL, ESP_ERR_INVALID_RESPONSE, TAG, "points json");
 
-    err = ESP_ERR_NOT_FOUND;
     const cJSON *props = cJSON_GetObjectItemCaseSensitive(root, "properties");
-    const cJSON *forecast = cJSON_GetObjectItemCaseSensitive(props, "forecast");
-    if (cJSON_IsString(forecast) && forecast->valuestring != NULL) {
-        if (strlen(forecast->valuestring) < len) {
-            strlcpy(buf, forecast->valuestring, len);
-            err = ESP_OK;
-        } else {
-            err = ESP_ERR_NO_MEM;
+    err = copy_string_field(props, "forecast", s_forecast_url, sizeof(s_forecast_url));
+    if (err == ESP_OK) {
+        /* Not fatal. Without a station list there are no live observations, but
+         * the forecast — which is what the dial is built on — still works, and
+         * failing the whole resolution would take it down too. */
+        esp_err_t serr = copy_string_field(props, "observationStations",
+                                           s_stations_url, sizeof(s_stations_url));
+        if (serr != ESP_OK) {
+            ESP_LOGW(TAG, "no station list: %s", esp_err_to_name(serr));
+            s_stations_url[0] = '\0';
         }
     }
 
     cJSON_Delete(root);
     return err;
+}
+
+/* Fills s_stations from the head of the station list.
+ *
+ * Text scan, not a parse. The response is 75 kB against a chip with tens of
+ * kilobytes to spare, so only its first pages are read, and a truncated
+ * document is not JSON — cJSON would reject it outright. What is being looked
+ * for is a fixed key in a machine-generated document, which is the narrow case
+ * where scanning for a literal is sound rather than lazy. */
+static esp_err_t resolve_stations(void)
+{
+    ESP_RETURN_ON_FALSE(s_stations_url[0] != '\0', ESP_ERR_INVALID_STATE,
+                        TAG, "no station list url");
+
+    char *body = malloc(STATIONS_MAX);
+    ESP_RETURN_ON_FALSE(body != NULL, ESP_ERR_NO_MEM, TAG, "no memory");
+
+    esp_err_t err = fetch_bounded(s_stations_url, body, STATIONS_MAX, true);
+    if (err != ESP_OK) {
+        free(body);
+        return err;
+    }
+
+    /* Scanned into a local and published in one step. Writing the shared array
+     * entry by entry would let a reader see the first station of the new
+     * location beside the third of the old one. */
+    char found_ids[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX] = {0};
+
+    /* The key only. The separator is matched by skipping to the value's opening
+     * quote rather than by spelling it out: this document is pretty-printed
+     * ("stationIdentifier": "KMGY") and the compact form appears nowhere in it,
+     * which is exactly the assumption the first version of this made and found
+     * zero stations for. Whitespace inside JSON is the server's choice and not
+     * something to encode a guess about. */
+    static const char KEY[] = "\"stationIdentifier\"";
+    int found = 0;
+    const char *p = body;
+    while (found < WEATHER_STATION_COUNT && (p = strstr(p, KEY)) != NULL) {
+        p += sizeof(KEY) - 1;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ':') {
+            p++;
+        }
+        if (*p != '"') {
+            break;
+        }
+        p++;
+        const char *end = strchr(p, '"');
+        /* A closing quote missing, or an identifier longer than any real one,
+         * means the prefix ended mid-field. Stop rather than store a fragment:
+         * the truncation point is arbitrary and the last entry is the one it
+         * lands in. */
+        if (end == NULL || (size_t)(end - p) >= WEATHER_STATION_ID_MAX) {
+            break;
+        }
+        memcpy(found_ids[found], p, (size_t)(end - p));
+        found++;
+        p = end;
+    }
+    free(body);
+
+    if (found == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    memcpy(s_stations, found_ids, sizeof(s_stations));
+    portEXIT_CRITICAL(&s_lock);
+
+    ESP_LOGI(TAG, "stations: %s %s %s", s_stations[0], s_stations[1], s_stations[2]);
+    return ESP_OK;
 }
 
 /* Days since 1970-01-01 for a proleptic Gregorian date — Howard Hinnant's
@@ -483,9 +615,15 @@ static esp_err_t poll_alerts(void)
 static esp_err_t poll_once(void)
 {
     if (s_forecast_url[0] == '\0') {
-        ESP_RETURN_ON_ERROR(resolve_forecast_url(s_forecast_url, sizeof(s_forecast_url)),
-                            TAG, "resolve");
+        ESP_RETURN_ON_ERROR(resolve_grid(), TAG, "resolve");
         ESP_LOGI(TAG, "grid resolved: %s", s_forecast_url);
+
+        /* Best effort, and after the forecast URL is in hand. A station list
+         * that cannot be read costs the observations and nothing else. */
+        esp_err_t serr = resolve_stations();
+        if (serr != ESP_OK) {
+            ESP_LOGW(TAG, "stations unresolved: %s", esp_err_to_name(serr));
+        }
     }
 
     char *body = malloc(RESPONSE_MAX);
@@ -613,6 +751,13 @@ void weather_report_copy(weather_report_t *out)
     portEXIT_CRITICAL(&s_lock);
 }
 
+void weather_stations_copy(char out[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX])
+{
+    portENTER_CRITICAL(&s_lock);
+    memcpy(out, s_stations, sizeof(s_stations));
+    portEXIT_CRITICAL(&s_lock);
+}
+
 esp_err_t weather_location_set(double lat, double lon)
 {
     if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
@@ -638,6 +783,10 @@ esp_err_t weather_location_set(double lat, double lon)
          * here rather than recomputing keeps this function free of network
          * work — the next poll resolves it, and fails visibly if it cannot. */
         s_forecast_url[0] = '\0';
+        s_stations_url[0] = '\0';
+        for (int i = 0; i < WEATHER_STATION_COUNT; i++) {
+            s_stations[i][0] = '\0';
+        }
         portENTER_CRITICAL(&s_lock);
         s_report.fetched = 0;
         /* The forecast schedule belongs to the old coordinates too. Without

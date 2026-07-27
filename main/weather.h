@@ -90,6 +90,27 @@ typedef struct {
     time_t checked;    /* when the alert feed was last read; 0 for never */
 } weather_alert_t;
 
+/* Nearby observation stations, nearest first.
+ *
+ * Three, not one. The nearest station is not always the best equipped — the
+ * closest to the test coordinates reports no wind gust, no sea-level pressure
+ * and no three-hour precipitation on an ordinary clear day — so a reading
+ * missing from the first can be sought from the next.
+ *
+ * The list they come from is 75 kB, which does not fit anywhere on this chip,
+ * and only its head is wanted. It is read as a prefix and scanned as text; that
+ * works because the list is ordered nearest-first, which the API documentation
+ * does not state and which was therefore measured. See weather.c. */
+#define WEATHER_STATION_COUNT 3
+
+/* NWS identifiers are four characters for airports ("KMGY") and up to six for
+ * the rest. */
+#define WEATHER_STATION_ID_MAX 8
+
+/* Copies the resolved station identifiers. Entries are empty strings until the
+ * first successful poll, and beyond however many were found. */
+void weather_stations_copy(char out[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX]);
+
 /* The most serious alert covering the stored coordinates.
  *
  * Only the worst one is kept. A point under three simultaneous alerts is not
