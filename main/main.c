@@ -8,6 +8,8 @@
 #include "time_cmd.h"
 #include "time_sync.h"
 #include "ui.h"
+#include "weather.h"
+#include "weather_cmd.h"
 #include "wifi_cmd.h"
 #include "wifi_sta.h"
 
@@ -55,6 +57,7 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_cmd_register());
     ESP_ERROR_CHECK(time_cmd_register());
     ESP_ERROR_CHECK(ota_cmd_register());
+    ESP_ERROR_CHECK(weather_cmd_register());
     ESP_ERROR_CHECK(console_init());
 
     /* Init failure stays fatal: there is no useful fallback for a device whose
@@ -95,6 +98,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ota_start());
     ESP_ERROR_CHECK(time_sync_start());
     ESP_ERROR_CHECK(wifi_sta_start());
+    ESP_ERROR_CHECK(weather_start());
 #endif
 
     /* LVGL runs in its own task; nothing further is needed here. */

@@ -5,10 +5,13 @@ a 240×240 round GC9A01 display, originally a Klipper printer monitor.
 
 The stock Knomi firmware has been replaced and is not being kept.
 
-The foundation is finished: display, LVGL, a serial console, Wi-Fi, a
-network-set clock, and firmware updates over the air with automatic rollback.
-What the board eventually *does* with all that is still undecided — it currently
-shows four animals.
+It is becoming a **storm watch**: a desk ornament that says how close the next
+thunderstorm is.
+
+The foundation under that is finished — display, LVGL, a serial console, Wi-Fi,
+a network-set clock, firmware updates over the air with automatic rollback, and
+a National Weather Service client. What is missing is the screen: the board
+knows the forecast and still shows four animals.
 
 Built on ESP-IDF's native `esp_lcd` stack rather than Arduino/TFT_eSPI, so the
 concepts carry over to other ESP32 boards. Only the pin numbers came from BTT.
@@ -36,12 +39,20 @@ Verified on hardware:
   confirm itself and watching it roll back.
 - **Stack smashing protection**, turned on when the HTTP client arrived and the
   reason to defer it expired.
+- **The weather** — a twelve-hourly forecast from the US National Weather
+  Service over TLS, reporting how close the next thunderstorm is. Coordinates
+  are set at the console and stored in NVS.
 
-Not done: anything that uses the network for a purpose. The board knows who it
-is, where it is on the network and what time it is, and shows none of it — the
-glass still shows only the zoo. Clock and weather, a Klipper/Moonraker monitor,
-an MQTT display are all unblocked and none has been chosen. Each needs a screen
-design, which is the first real UI decision this project has had to make.
+**The purpose is a storm watch.** The board knows where it is, what time it is,
+and whether a thunderstorm is coming — and shows none of it. The glass still
+shows four animals. What is left is the screen: a layout decision, which is the
+first real UI question this project has had to answer.
+
+Why the weather service is worth naming: `api.weather.gov` is free, needs no
+API key, and is run by the agency that issues the forecasts. The cost is that
+it covers **the United States only**, and that it is a two-request API — the
+`/points` endpoint returns which forecast grid a coordinate falls in, and the
+forecast lives at a URL it hands back.
 
 ## Hardware
 
@@ -211,6 +222,9 @@ does not exist yet.
 | `ota <url>` | install firmware into the inactive slot |
 | `ota_status` | running slot, version, and whether it is confirmed |
 | `reboot` | restart |
+| `weather` | the forecast, and how close a thunderstorm is |
+| `weather_refresh` | ask the weather task to fetch now |
+| `loc [<lat> <lon>]` | show or set the forecast location |
 
 For scripted use without a terminal:
 
@@ -326,8 +340,10 @@ main/
   time_cmd.c/h   the time and tz console commands
   ota.c/h        firmware updates, and the rollback confirmation
   ota_cmd.c/h    the ota, ota_status and reboot console commands
+  weather.c/h    NWS forecast: its own task, coordinates in NVS
+  weather_cmd.c/h the weather, weather_refresh and loc commands
   main.c         boot path: NVS -> commands -> console -> display -> UI -> fade
-                 -> net -> ota -> time -> wifi
+                 -> net -> ota -> time -> wifi -> weather
 assets/          sprite PNGs; the source of truth for the art
 tools/
   capture.py     serial capture that survives a USB replug

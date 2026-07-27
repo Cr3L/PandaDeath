@@ -208,7 +208,9 @@ time_sync.c/h  SNTP, and the timezone in NVS; starts on got-IP
 time_cmd.c/h   the time and tz console commands
 ota.c/h        firmware updates, and the rollback confirmation
 ota_cmd.c/h    the ota, ota_status and reboot console commands
-main.c         boot path: NVS → commands → console → display → UI → fade → net → ota → time → wifi
+weather.c/h    NWS forecast: its own task, coordinates in NVS
+weather_cmd.c/h the weather, weather_refresh and loc console commands
+main.c         boot path: NVS → commands → console → display → UI → fade → net → ota → time → wifi → weather
 ```
 
 Console commands live with the module whose state they touch, not in
@@ -293,6 +295,23 @@ silently falls back to UTC. `tz` therefore prints the resulting wall clock and
 the check is Michael recognising it. Note the sign convention — the offset is
 west-positive, so Eastern is `EST5EDT`, not `EST-5EDT`.
 
-What the device *does* is still undecided. Clock + weather, a Klipper/Moonraker
-monitor and an MQTT display are all now unblocked; each needs a screen design,
-which is the first real UI decision the project has had to make.
+**Weather is the chosen purpose**, and the data half of it is done: the board
+fetches a twelve-hourly forecast from api.weather.gov and works out how close
+the next thunderstorm is. Coordinates go in at the console (`loc`) and live in
+NVS — never in the tree, for the same reason credentials do not.
+
+Three things about that module are load-bearing and non-obvious:
+
+- **It is a two-request API.** `/points/{lat},{lon}` returns which grid square
+  the coordinates fall in, not a forecast; the forecast is at a URL it hands
+  back. The grid never moves, so that lookup is cached until `loc` changes.
+- **TLS needs the clock.** A certificate is rejected when the board thinks it
+  is 1970, so the poll task waits for `time_sync_synced()` as well as an
+  address. Skipping that produces a TLS failure that reads as a network fault.
+- **The fetch never runs on the console task.** `weather_refresh` notifies the
+  weather task and returns. A handshake against the full certificate bundle
+  plus a 14 kB parse is more stack than a console command has, and with stack
+  protection on that is a halt rather than a mystery.
+
+What remains is the screen. The board knows the weather and still shows four
+animals.

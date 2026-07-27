@@ -162,3 +162,24 @@ images perfectly well during testing, so nothing was blocked.
 **Trigger:** the first time an update has to be identified after the fact rather
 than during a session that just built it — which is the first update that
 matters. A `version.txt` read by IDF as `PROJECT_VER` is the small fix.
+
+## 11. The forecast is twelve-hourly, not hourly
+
+`weather` answers "storms tonight", not "storms in three hours". The hourly
+endpoint exists and gives exactly that — 156 periods with the same fields — but
+its document is **92 kB against 14 kB**, measured, and a cJSON tree built from
+it is several times that again. That does not fit in DRAM beside Wi-Fi and TLS.
+
+This is item 5's trigger, and the two should be done together: enabling PSRAM
+gives 8 MB, and cJSON can be pointed at it with `cJSON_InitHooks` so the parse
+tree lands there rather than in internal RAM. The response buffer would go the
+same way.
+
+**Why it waits:** twelve-hourly resolution is genuinely useful for a desk
+ornament — "storm tonight, 40%" is the whole question most days — and doing it
+now would mean enabling PSRAM, rehoming an allocator, and landing a feature in
+one change, with three ways to fail and one test.
+
+**Trigger:** the first time twelve hours proves too coarse to act on. Watching
+it for a week is the honest way to find out. Note the standing warning in item
+5 still applies — PSRAM is for the JSON, never for LVGL draw buffers.
