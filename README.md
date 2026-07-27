@@ -5,13 +5,12 @@ a 240×240 round GC9A01 display, originally a Klipper printer monitor.
 
 The stock Knomi firmware has been replaced and is not being kept.
 
-It is becoming a **storm watch**: a desk ornament that says how close the next
-thunderstorm is.
+It is a **storm watch**: a desk ornament that says how close the next
+thunderstorm is, what the air is doing right now, and when the sun sets.
 
-The foundation under that is finished — display, LVGL, a serial console, Wi-Fi,
-a network-set clock, firmware updates over the air with automatic rollback, and
-a National Weather Service client. What is missing is the screen: the board
-knows the forecast and still shows four animals.
+Display, LVGL, a serial console, Wi-Fi, a network-set clock, firmware updates
+over the air with automatic rollback, a National Weather Service client, and the
+screen that shows all of it.
 
 Built on ESP-IDF's native `esp_lcd` stack rather than Arduino/TFT_eSPI, so the
 concepts carry over to other ESP32 boards. Only the pin numbers came from BTT.
@@ -46,14 +45,26 @@ Verified on hardware:
   coordinates. A *warning* takes over the whole screen in crimson; a *watch*
   gets a line. Verified against a live Flood Warning in Texas by pointing the
   board at it.
-- **The storm screen** — a rim dial whose fill is nearness times probability,
-  so it is dramatic only when a storm is both close and likely, with the
-  temperature, an ETA and a rotating thunderstorm fact.
+- **Live observations** — the latest reading from the nearest reporting
+  station: temperature, dewpoint, humidity, wind and gusts, visibility and
+  barometric pressure, converted from the service's SI to US units at parse
+  time. Nearby stations are found by reading the head of a 75 kB list, which is
+  ordered nearest-first.
+- **A barometric trend the board computes itself** — pressure change over three
+  hours, kept in RAM and keyed on each station's own reading time, so the poll
+  interval does not affect what "three hours" means. The one figure here that is
+  not read off a wire.
+- **Sunrise and sunset** — NOAA's sunrise equation from the stored coordinates.
+  No network, no failure mode, verified against the US Naval Observatory to
+  within 42 seconds across the continental US.
+- **The storm screen** — a rim dial whose fill is nearness times probability, so
+  it is dramatic only when a storm is both close and likely, above the measured
+  temperature, an ETA, and live readings: dewpoint, pressure with a trend arrow,
+  wind or gusts, and the next sun event.
 
-**The purpose is a storm watch.** The board knows where it is, what time it is,
-and whether a thunderstorm is coming — and shows none of it. The glass still
-shows four animals. What is left is the screen: a layout decision, which is the
-first real UI question this project has had to answer.
+**The purpose is a storm watch, and it is now what the board does.** It knows
+where it is, what time it is, what the instruments say, and whether a
+thunderstorm is coming — and shows all of it on the glass.
 
 Why the weather service is worth naming: `api.weather.gov` is free, needs no
 API key, and is run by the agency that issues the forecasts. The cost is that
@@ -229,7 +240,7 @@ does not exist yet.
 | `ota <url>` | install firmware into the inactive slot |
 | `ota_status` | running slot, version, and whether it is confirmed |
 | `reboot` | restart |
-| `weather` | the forecast, and how close a thunderstorm is |
+| `wx` | everything: readings, sun, forecast and alerts, in one table |
 | `weather_refresh` | ask the weather task to fetch now |
 | `loc [<lat> <lon>]` | show or set the forecast location |
 
@@ -351,8 +362,9 @@ main/
   time_cmd.c/h   the time and tz console commands
   ota.c/h        firmware updates, and the rollback confirmation
   ota_cmd.c/h    the ota, ota_status and reboot console commands
-  weather.c/h    NWS forecast: its own task, coordinates in NVS
-  weather_cmd.c/h the weather, weather_refresh and loc commands
+  weather.c/h    NWS forecast, alerts and observations; coordinates in NVS
+  weather_cmd.c/h the wx table, weather_refresh and loc commands
+  sun.c/h        sunrise and sunset from coordinates; no state, no network
   main.c         boot path: NVS -> commands -> console -> display -> UI -> fade
                  -> net -> ota -> time -> wifi -> weather
 assets/          sprite PNGs; the source of truth for the art

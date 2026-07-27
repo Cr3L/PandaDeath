@@ -76,26 +76,46 @@
  * dead band under the temperature that never filled: the screen looked like it
  * had lost something. It now takes its space only when it has something to say,
  * and everything below it moves down by ALERT_SHIFT when it does. */
-#define Y_CLOCK   -70
-#define Y_TEMP    -34
-#define Y_ALERT     4
-#define Y_ETA       4
-#define Y_READ_TOP 32
-#define Y_READ_BOT 50
-#define ALERT_SHIFT 22
+#define Y_HEADLINE -52
+#define Y_SUB      -22
+#define Y_ALERT     -1
+#define Y_READ_TOP   6
+#define Y_READ_MID  24
+#define Y_READ_BOT  42
+#define Y_CLOCK     66
+
+/* Enough for a watch line that wraps to two, which most of them do: "Severe
+ * Thunderstorm Watch" is wider than TEXT_WIDTH at this font. A shift sized for
+ * one line would have let the second overwrite the readings, and the case is
+ * rare enough that it would have been found by a real watch rather than by
+ * testing. */
+#define ALERT_SHIFT 38
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_clock;
-static lv_obj_t *s_temp;
-static lv_obj_t *s_alert;   /* the watch line, in the middle; usually hidden */
-static lv_obj_t *s_eta;
 
-/* Live readings from the nearest station, two lines under the headline. These
- * replaced eight rotating thunderstorm facts, which were charming for about a
- * week and then were furniture — a fixed list on a device that is on all day
- * gets memorised, and memorised text stops being read. These change on their
- * own, which is the only way a glanceable screen stays worth glancing at. */
+/* The headline, and the only thing on this screen in a large font: how long
+ * until the storm. Everything else is evidence for it.
+ *
+ * The temperature held this place first, for the bad reason that it was the
+ * biggest number available. But this is a storm watch — the question it exists
+ * to answer from across a room is "is one coming, and how soon", and the
+ * temperature answers a different one. It is now a supporting reading among the
+ * others, which is what it always was. */
+static lv_obj_t *s_headline;
+static lv_obj_t *s_sub;     /* what the headline is counting down to */
+
+static lv_obj_t *s_alert;   /* the watch line; usually hidden */
+
+/* The evidence, three lines under the headline. Ordered so they build the same
+ * case: how hot and how humid, then what the pressure and wind are doing, then
+ * how much daylight is left to do it in.
+ *
+ * These replaced eight rotating thunderstorm facts, which were charming for
+ * about a week and then were furniture — a fixed list on a device that is on
+ * all day gets memorised, and memorised text stops being read. */
 static lv_obj_t *s_reading_top;
+static lv_obj_t *s_reading_mid;
 static lv_obj_t *s_reading_bottom;
 
 /* Shown alone when a warning is active: everything else is hidden behind it.
@@ -160,8 +180,9 @@ static int32_t arc_value(const weather_report_t *r, time_t now)
     return value < 4 ? 4 : value;
 }
 
-/* "in 3 h" / "in 2 d 4 h". Hours alone would read "in 39 h" two days out, which
- * is arithmetic the reader should not have to do. */
+/* "3 h" / "2 d 4 h" — the duration alone, because it is the headline and the
+ * subtitle underneath supplies the sentence around it. Hours alone would read
+ * "39 h" two days out, which is arithmetic the reader should not have to do. */
 static void format_eta(char *buf, size_t len, time_t starts_at, time_t now)
 {
     const double seconds = difftime(starts_at, now);
@@ -172,9 +193,9 @@ static void format_eta(char *buf, size_t len, time_t starts_at, time_t now)
 
     const int hours = (int)(seconds / 3600.0);
     if (hours < 24) {
-        snprintf(buf, len, "in %d h", hours);
+        snprintf(buf, len, "%d h", hours);
     } else {
-        snprintf(buf, len, "in %d d %d h", hours / 24, hours % 24);
+        snprintf(buf, len, "%d d %d h", hours / 24, hours % 24);
     }
 }
 
@@ -193,9 +214,9 @@ static bool alert_takes_over(const weather_alert_t *a)
  *
  * lv_label_set_text frees and reallocates the string and invalidates the
  * label's area, so rewriting identical text drags a redraw over SPI for
- * nothing. The existing clock and temperature guard this way with their own
- * static; the readings are two more of the same, so it is a function now
- * rather than a third and fourth copy of the pattern. */
+ * nothing — and at REFRESH_MS that is six needless redraws a minute per label.
+ * Every label on this screen is guarded, which was five copies of the same
+ * three lines before it became a function. */
 static void set_text_if_changed(lv_obj_t *label, char *last, size_t last_len,
                                 const char *text)
 {
@@ -205,19 +226,36 @@ static void set_text_if_changed(lv_obj_t *label, char *last, size_t last_len,
     }
 }
 
-/* The live readings, in two lines under the storm line.
+/* Joins two fields on one line, with the separator only where both exist.
+ * Every line below is built this way, and spelling the conditional out each
+ * time is where the missing-field bugs would live. */
+static void join(char *out, size_t len, const char *left, const char *right)
+{
+    snprintf(out, len, "%s%s%s", left,
+             (left[0] != '\0' && right[0] != '\0') ? "   " : "", right);
+}
+
+/* The evidence, three lines under the headline.
  *
- * What earns a place is what changes and what a storm changes first. Dewpoint
- * is the storm fuel and the honest humidity figure — 58% means nothing without
- * a temperature beside it, a 68° dewpoint means "muggy" to anyone. Pressure
- * with its trend is the classic, and the only number here the board works out
- * for itself. Gusts displace the steady wind whenever the station reports them,
- * because a gust front arriving ahead of a storm is exactly the moment this
- * screen is worth looking at, and on an ordinary day there is no gust to show.
+ * The headline says a storm is coming; these say why anyone should believe it,
+ * so they are ordered as that argument. Temperature and dewpoint are the fuel —
+ * dewpoint being the honest humidity figure, since 58% means nothing without a
+ * temperature beside it while a 68° dewpoint means "muggy" to anyone. Pressure
+ * with its trend arrow and the wind are the machinery: a falling barometer and
+ * a rising wind are the storm arriving. Gusts displace the steady wind whenever
+ * the station reports one, because a gust front ahead of a storm is exactly the
+ * moment this screen is worth looking at, and on a quiet day there is no gust
+ * to show. The sun is last, being context rather than evidence.
  *
  * Anything the station did not report is left out rather than shown as a dash.
  * The console table has a fixed shape so a gap is visibly a gap; the glass has
- * eleven characters a line and should spend them on what is known. */
+ * about eleven characters a line and should spend them on what is known.
+ *
+ * The temperature is the measured one, not the forecast's. Those differ by
+ * several degrees routinely: the report carries what the forecast office
+ * expects for this half of the day, while the observation is what an instrument
+ * recorded a few miles away twenty minutes ago. It sat in the large font once,
+ * for the bad reason that it was the biggest number available. */
 static void update_readings(const weather_obs_t *obs, time_t now)
 {
     /* Generously sized for about twenty characters of content. The compiler
@@ -225,12 +263,20 @@ static void update_readings(const weather_obs_t *obs, time_t now)
      * as a truncation it must warn about, which -Werror turns into a build
      * failure; headroom is cheaper than suppressing the diagnostic. */
     char top[64] = "";
+    char mid[64] = "";
     char bottom[64] = "";
 
     if (obs->observed != 0) {
+        char temperature[24] = "";
         char dew[24] = "";
         char pressure[32] = "";
+        char wind[24] = "";
 
+        if (obs->temperature != WEATHER_UNKNOWN) {
+            /* Always Fahrenheit: observations are converted at parse time, so
+             * unlike the forecast there is no unit travelling with the value. */
+            snprintf(temperature, sizeof(temperature), "%d°F", obs->temperature);
+        }
         if (obs->dewpoint != WEATHER_UNKNOWN) {
             snprintf(dew, sizeof(dew), "dew %d°", obs->dewpoint);
         }
@@ -250,14 +296,14 @@ static void update_readings(const weather_obs_t *obs, time_t now)
             }
             snprintf(pressure, sizeof(pressure), "%d mb%s", obs->pressure, arrow);
         }
-        snprintf(top, sizeof(top), "%s%s%s", dew,
-                 (dew[0] != '\0' && pressure[0] != '\0') ? "   " : "", pressure);
-
         if (obs->gust != WEATHER_UNKNOWN) {
-            snprintf(bottom, sizeof(bottom), "gusts %d", obs->gust);
+            snprintf(wind, sizeof(wind), "gust %d", obs->gust);
         } else if (obs->wind != WEATHER_UNKNOWN) {
-            snprintf(bottom, sizeof(bottom), "wind %d", obs->wind);
+            snprintf(wind, sizeof(wind), "wind %d", obs->wind);
         }
+
+        join(top, sizeof(top), temperature, dew);
+        join(mid, sizeof(mid), pressure, wind);
     }
 
     /* The next sun event, whichever it is. Showing both would spend a line on
@@ -278,18 +324,16 @@ static void update_readings(const weather_obs_t *obs, time_t now)
             while (*trimmed == ' ') {
                 trimmed++;
             }
-            char sun[32];
-            snprintf(sun, sizeof(sun), "%s %s", before_rise ? "rise" : "set", trimmed);
-            if (bottom[0] != '\0') {
-                strlcat(bottom, "   ", sizeof(bottom));
-            }
-            strlcat(bottom, sun, sizeof(bottom));
+            snprintf(bottom, sizeof(bottom), "%s %s",
+                     before_rise ? "sunrise" : "sunset", trimmed);
         }
     }
 
     static char last_top[64];
+    static char last_mid[64];
     static char last_bottom[64];
     set_text_if_changed(s_reading_top, last_top, sizeof(last_top), top);
+    set_text_if_changed(s_reading_mid, last_mid, sizeof(last_mid), mid);
     set_text_if_changed(s_reading_bottom, last_bottom, sizeof(last_bottom), bottom);
 }
 
@@ -306,9 +350,35 @@ static void set_alert_room(bool alert_visible)
     applied = wanted;
 
     const int shift = alert_visible ? ALERT_SHIFT : 0;
-    lv_obj_align(s_eta, LV_ALIGN_CENTER, 0, Y_ETA + shift);
     lv_obj_align(s_reading_top, LV_ALIGN_CENTER, 0, Y_READ_TOP + shift);
+    lv_obj_align(s_reading_mid, LV_ALIGN_CENTER, 0, Y_READ_MID + shift);
     lv_obj_align(s_reading_bottom, LV_ALIGN_CENTER, 0, Y_READ_BOT + shift);
+
+
+}
+
+/* The clock goes rather than moving when something needs its space. Shifted
+ * down with the readings it would land where the panel has curved away, and of
+ * everything on this screen it is the line an active alert most clearly
+ * outranks.
+ *
+ * It owns its own visibility, guarded, because two callers decide it — a
+ * takeover and a watch — and the every-refresh loop below would otherwise
+ * un-hide it a tick after set_alert_room hid it. That is exactly the bug this
+ * shape prevents: a guard that only fires on a change, racing an assignment
+ * that fires unconditionally. */
+static void set_clock_visible(bool visible)
+{
+    static int applied = -1;
+    if (applied == (int)visible) {
+        return;
+    }
+    applied = (int)visible;
+    if (visible) {
+        lv_obj_remove_flag(s_clock, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_clock, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void refresh_cb(lv_timer_t *timer)
@@ -319,8 +389,10 @@ static void refresh_cb(lv_timer_t *timer)
     weather_alert_copy(&alert);
 
     const bool takeover = alert_takes_over(&alert);
-    lv_obj_t *const hidden[] = { s_arc, s_clock, s_temp, s_alert, s_eta,
-                                 s_reading_top, s_reading_bottom };
+    /* s_clock is not here: set_clock_visible owns it, because a watch hides it
+     * too and two owners of one flag is how it ends up flickering. */
+    lv_obj_t *const hidden[] = { s_arc, s_headline, s_sub, s_alert,
+                                 s_reading_top, s_reading_mid, s_reading_bottom };
     for (size_t i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {
         if (takeover) {
             lv_obj_add_flag(hidden[i], LV_OBJ_FLAG_HIDDEN);
@@ -328,6 +400,8 @@ static void refresh_cb(lv_timer_t *timer)
             lv_obj_remove_flag(hidden[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
+    set_clock_visible(!takeover && alert.level == WEATHER_ALERT_NONE);
+
     if (takeover) {
         lv_obj_remove_flag(s_takeover, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s_takeover, alert.event);
@@ -372,10 +446,7 @@ static void refresh_cb(lv_timer_t *timer)
         trimmed++;
     }
     static char last_clock[16];
-    if (strcmp(last_clock, trimmed) != 0) {
-        strlcpy(last_clock, trimmed, sizeof(last_clock));
-        lv_label_set_text(s_clock, trimmed);
-    }
+    set_text_if_changed(s_clock, last_clock, sizeof(last_clock), trimmed);
 
     weather_obs_t obs;
     weather_obs_copy(&obs);
@@ -386,58 +457,74 @@ static void refresh_cb(lv_timer_t *timer)
      * throwing away what it knows. */
     update_readings(&obs, now);
 
-    /* The measured temperature, not the forecast one.
-     *
-     * These are different numbers and routinely disagree by several degrees:
-     * weather_report_t.temperature is what the forecast office expects for this
-     * half of the day, while the observation is what an instrument recorded a
-     * few miles away twenty minutes ago. The headline figure on a device
-     * sitting in the room should be the second. The forecast temperature stays
-     * in the report for the storm line to reason about. */
-    static int last_temp = INT_MIN;
-    const int shown = (obs.observed != 0 && obs.temperature != WEATHER_UNKNOWN)
-                      ? obs.temperature : INT_MIN;
-    if (shown != last_temp) {
-        last_temp = shown;
-        if (shown == INT_MIN) {
-            lv_label_set_text(s_temp, "--");
-        } else {
-            /* Always Fahrenheit: the observation is converted at parse time, so
-             * unlike the forecast there is no unit travelling with it. */
-            lv_label_set_text_fmt(s_temp, "%d°F", shown);
-        }
-    }
+    /* The headline and its subtitle, together, because they are one sentence
+     * split across two sizes. The large half is the answer — how long — and the
+     * small half says what it is an answer to. Neither is readable alone: "2 h"
+     * without "storm" is a countdown to nothing, and "storm" without a time is
+     * what a forecast already said. */
+    static char last_headline[24];
+    static char last_sub[48];
+    char headline[24];
+    char sub[48];
+    uint32_t color;
 
     if (r.fetched == 0) {
-        lv_label_set_text(s_eta, "waiting for a forecast");
+        /* Not blank. A screen with an empty middle is indistinguishable from
+         * one that has stopped updating, and this state can last a minute after
+         * a cold boot. */
+        snprintf(headline, sizeof(headline), "--");
+        snprintf(sub, sizeof(sub), "waiting for a forecast");
+        color = COLOR_DIM;
         lv_arc_set_value(s_arc, 0);
         lv_obj_set_style_arc_color(s_arc, lv_color_hex(COLOR_TRACK), LV_PART_INDICATOR);
-        return;
-    }
-
-    const uint32_t color = storm_color(r.storm);
-    lv_obj_set_style_arc_color(s_arc, lv_color_hex(color), LV_PART_INDICATOR);
-    lv_arc_set_value(s_arc, arc_value(&r, now));
-    lv_obj_set_style_text_color(s_eta, lv_color_hex(color), LV_PART_MAIN);
-
-    if (r.storm == WEATHER_STORM_NONE) {
-        /* Said plainly rather than left blank. A blank line where a warning
-         * would go is indistinguishable from a screen that has stopped
-         * updating. */
-        lv_label_set_text(s_eta, "no storms in 7 days");
     } else {
-        char eta[24];
-        format_eta(eta, sizeof(eta), r.starts_at, now);
-        if (r.pop >= 0) {
-            /* Plain ASCII. A middle dot was prettier and rendered as an empty
-             * box: LVGL's Montserrat 14 carries the ASCII range and its own
-             * symbol set, not Latin-1 punctuation. Nothing in the source says
-             * so — it took a photograph of the glass. */
-            lv_label_set_text_fmt(s_eta, "storm %s, %d%%", eta, r.pop);
+        color = storm_color(r.storm);
+        lv_obj_set_style_arc_color(s_arc, lv_color_hex(color), LV_PART_INDICATOR);
+        lv_arc_set_value(s_arc, arc_value(&r, now));
+
+        if (r.storm == WEATHER_STORM_NONE) {
+            snprintf(headline, sizeof(headline), "CLEAR");
+            snprintf(sub, sizeof(sub), "next 7 days");
         } else {
-            lv_label_set_text_fmt(s_eta, "storm %s", eta);
+            if (r.storm == WEATHER_STORM_NOW) {
+                snprintf(headline, sizeof(headline), "NOW");
+            } else {
+                format_eta(headline, sizeof(headline), r.starts_at, now);
+            }
+
+            /* The period's own name and the probability — never the word
+             * "storm". The arc, the colour and the countdown have all said that
+             * already, and a screen this size cannot afford to say anything
+             * twice.
+             *
+             * The name is what the service calls the period: "Tonight",
+             * "Monday Night". It earns its place by being the thing "2 h" is
+             * not — precise but abstract, against how a person actually holds
+             * the time. Plain ASCII in the separator: a middle dot was prettier
+             * and rendered as an empty box, because LVGL's Montserrat 14 carries
+             * the ASCII range and its own symbols, not Latin-1 punctuation.
+             *
+             * No comma between them. They are two facts, not a clause — the
+             * punctuation invited the eye to read a sentence that is not there. */
+            if (r.when[0] != '\0' && r.pop >= 0) {
+                snprintf(sub, sizeof(sub), "%s %d%%", r.when, r.pop);
+            } else if (r.when[0] != '\0') {
+                snprintf(sub, sizeof(sub), "%s", r.when);
+            } else if (r.pop >= 0) {
+                snprintf(sub, sizeof(sub), "%d%% chance", r.pop);
+            } else {
+                sub[0] = '\0';
+            }
         }
     }
+
+    set_text_if_changed(s_headline, last_headline, sizeof(last_headline), headline);
+    set_text_if_changed(s_sub, last_sub, sizeof(last_sub), sub);
+
+    /* Both carry the storm colour. The subtitle is the headline's own words, so
+     * colouring only one of them would read as two unrelated lines. */
+    lv_obj_set_style_text_color(s_headline, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_sub, lv_color_hex(color), LV_PART_MAIN);
 }
 
 void ui_storm_screen_build(void)
@@ -468,12 +555,24 @@ void ui_storm_screen_build(void)
     lv_label_set_text(s_clock, "");
     lv_obj_set_style_text_color(s_clock, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
     lv_obj_align(s_clock, LV_ALIGN_CENTER, 0, Y_CLOCK);
+    /* Last, under the readings. It was at the top, above the headline, where it
+     * had the position of most importance for the one thing on this screen
+     * nobody needs it to tell them — every other device in the room already
+     * says the time. */
 
-    s_temp = lv_label_create(scr);
-    lv_label_set_text(s_temp, "--");
-    lv_obj_set_style_text_color(s_temp, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_temp, &lv_font_montserrat_28, LV_PART_MAIN);
-    lv_obj_align(s_temp, LV_ALIGN_CENTER, 0, Y_TEMP);
+    s_headline = lv_label_create(scr);
+    lv_label_set_text(s_headline, "--");
+    lv_obj_set_style_text_font(s_headline, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_align(s_headline, LV_ALIGN_CENTER, 0, Y_HEADLINE);
+
+    s_sub = lv_label_create(scr);
+    lv_label_set_long_mode(s_sub, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_sub, TEXT_WIDTH);
+    lv_obj_set_style_text_align(s_sub, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(s_sub, "");
+    lv_obj_align(s_sub, LV_ALIGN_CENTER, 0, Y_SUB);
+    /* Neither of these sets a colour here: refresh_cb assigns one on every path
+     * before the first frame, so a value set here would never be seen. */
 
     s_alert = lv_label_create(scr);
     lv_label_set_long_mode(s_alert, LV_LABEL_LONG_WRAP);
@@ -493,20 +592,19 @@ void ui_storm_screen_build(void)
     lv_obj_center(s_takeover);
     lv_obj_add_flag(s_takeover, LV_OBJ_FLAG_HIDDEN);
 
-    s_eta = lv_label_create(scr);
-    lv_label_set_long_mode(s_eta, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_eta, TEXT_WIDTH);
-    lv_obj_set_style_text_align(s_eta, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(s_eta, "");
-    lv_obj_set_style_text_color(s_eta, lv_color_hex(COLOR_CALM), LV_PART_MAIN);
-    lv_obj_align(s_eta, LV_ALIGN_CENTER, 0, Y_ETA);
-
     s_reading_top = lv_label_create(scr);
     lv_obj_set_width(s_reading_top, READING_WIDTH);
     lv_obj_set_style_text_align(s_reading_top, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(s_reading_top, "");
     lv_obj_set_style_text_color(s_reading_top, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
     lv_obj_align(s_reading_top, LV_ALIGN_CENTER, 0, Y_READ_TOP);
+
+    s_reading_mid = lv_label_create(scr);
+    lv_obj_set_width(s_reading_mid, READING_WIDTH);
+    lv_obj_set_style_text_align(s_reading_mid, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(s_reading_mid, "");
+    lv_obj_set_style_text_color(s_reading_mid, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
+    lv_obj_align(s_reading_mid, LV_ALIGN_CENTER, 0, Y_READ_MID);
 
     s_reading_bottom = lv_label_create(scr);
     lv_obj_set_width(s_reading_bottom, READING_WIDTH);

@@ -165,7 +165,7 @@ matters. A `version.txt` read by IDF as `PROJECT_VER` is the small fix.
 
 ## 11. The forecast is twelve-hourly, not hourly
 
-`weather` answers "storms tonight", not "storms in three hours". The hourly
+`wx` answers "storms tonight", not "storms in three hours". The hourly
 endpoint exists and gives exactly that — 156 periods with the same fields — but
 its document is **92 kB against 14 kB**, measured, and a cJSON tree built from
 it is several times that again. That does not fit in DRAM beside Wi-Fi and TLS.
@@ -183,3 +183,54 @@ one change, with three ways to fail and one test.
 **Trigger:** the first time twelve hours proves too coarse to act on. Watching
 it for a week is the honest way to find out. Note the standing warning in item
 5 still applies — PSRAM is for the JSON, never for LVGL draw buffers.
+
+## 12. `probabilityOfThunder` is not used, and the dial infers instead
+
+The storm state on the dial comes from string-matching `shortForecast` for the
+word "thunderstorm", with `probabilityOfPrecipitation` borrowed as a stand-in
+for how likely the storm is. That stand-in is wrong in a specific way: an 84%
+chance of *rain* in a period that mentions storms is not an 84% chance of
+*storms*.
+
+NWS publishes the real figure. `/gridpoints/{office}/{x},{y}` carries
+`probabilityOfThunder` as a first-class element, hourly — measured at 38 values
+for one grid square, alongside 58 others.
+
+**Why it waits:** that document is **292 kB**, measured, and the API offers no
+field filtering on it. It is twenty times the twelve-hourly forecast and three
+times the hourly one, so it does not fit even with PSRAM without a streaming
+parser that walks the body and keeps one element while discarding the rest.
+That parser is the work, and it is the same work item 11 needs.
+
+Note also that several elements of that document are populated by some forecast
+offices and not others — `lightningActivityLevel`, `hazards` and `pressure` all
+came back empty for the test grid square while `probabilityOfThunder` and
+`skyCover` were full. Anything built on the empty ones would work in one part of
+the country and silently show nothing in another, which is the worst failure
+mode on a screen with no error channel.
+
+**Trigger:** doing item 11. The streaming parser serves both, and the dial's
+central claim stops being an inference the moment it lands.
+
+## 13. There is no test setup, and the pressure trend wanted one
+
+`pressure_trend()` and `record_pressure()` were verified by extracting them
+verbatim from `weather.c` into a host harness and running twelve cases — both
+signs, spans scaled up and down, ring selection, duplicate and out-of-order
+timestamps, a null reading, a station change. All passed, and the bug that
+matters (a 6 h span quoted as a 3 h one) is exactly the kind that hardware
+cannot show you: real pressure does not move fast enough to exercise it.
+
+The harness is not committed. It depends on textually extracting two functions
+from a source file, so it would break the first time either moved, and a test
+that lies about what it covers is worse than none.
+
+**Why it waits:** IDF ships `unity` and supports a host-target build, but
+adopting it means a second build configuration, deciding what belongs in it, and
+maintaining that decision. That is a real commitment, and it should be made
+deliberately rather than as a side effect of one function needing twelve cases.
+
+**Trigger:** the second piece of pure logic that cannot be checked on hardware.
+The first one has now happened; a second means the pattern is real rather than
+an exception, and the harness above is the argument for what such a setup would
+have caught.

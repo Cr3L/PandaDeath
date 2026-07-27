@@ -208,8 +208,10 @@ time_sync.c/h  SNTP, and the timezone in NVS; starts on got-IP
 time_cmd.c/h   the time and tz console commands
 ota.c/h        firmware updates, and the rollback confirmation
 ota_cmd.c/h    the ota, ota_status and reboot console commands
-weather.c/h    NWS forecast: its own task, coordinates in NVS
-weather_cmd.c/h the weather, weather_refresh and loc console commands
+weather.c/h    NWS forecast, alerts and live observations: its own task,
+               coordinates in NVS; owns the pressure history behind the trend
+weather_cmd.c/h the wx table, weather_refresh and loc console commands
+sun.c/h        sunrise and sunset from coordinates — no state, no network
 main.c         boot path: NVS → commands → console → display → UI → fade → net → ota → time → wifi → weather
 ```
 
@@ -229,6 +231,12 @@ Sprite art lives in `assets/` as PNG and is the source of truth; the generated
 C is committed so the firmware build needs nothing beyond the IDF. Regenerate
 with `python3 tools/gen_sprites.py` (needs Pillow, in the *system* python, not
 the IDF virtualenv) rather than editing the output.
+
+The storm screen carries live instrument readings under the headline —
+dewpoint, pressure with a trend arrow, wind or gusts, the next sun event. It
+used to rotate eight thunderstorm facts there; those are gone, because a fixed
+list on a device that is on all day gets memorised and memorised text stops
+being read.
 
 There is nothing on the glass but the zoo. The Wi-Fi glyph that used to sit at
 the top was removed deliberately; connection state is a console question now
@@ -295,12 +303,16 @@ silently falls back to UTC. `tz` therefore prints the resulting wall clock and
 the check is Michael recognising it. Note the sign convention — the offset is
 west-positive, so Eastern is `EST5EDT`, not `EST-5EDT`.
 
-**Weather is the chosen purpose**, and the data half of it is done: the board
-fetches a twelve-hourly forecast from api.weather.gov and works out how close
-the next thunderstorm is. Coordinates go in at the console (`loc`) and live in
-NVS — never in the tree, for the same reason credentials do not.
+**Weather is the chosen purpose**, and it is done. The board fetches a
+twelve-hourly forecast from api.weather.gov, works out how close the next
+thunderstorm is, watches for active alerts, and reads the latest observation
+from the nearest reporting station. Coordinates go in at the console (`loc`) and
+live in NVS — never in the tree, for the same reason credentials do not.
 
-Three things about that module are load-bearing and non-obvious:
+`wx` is the one view command; it replaced `weather`, `obs` and `sun`, which were
+three layouts for one question.
+
+Six things about that module are load-bearing and non-obvious:
 
 - **It is a two-request API.** `/points/{lat},{lon}` returns which grid square
   the coordinates fall in, not a forecast; the forecast is at a URL it hands
@@ -308,6 +320,23 @@ Three things about that module are load-bearing and non-obvious:
 - **TLS needs the clock.** A certificate is rejected when the board thinks it
   is 1970, so the poll task waits for `time_sync_synced()` as well as an
   address. Skipping that produces a TLS failure that reads as a network fault.
+- **The station list is read as a prefix, not parsed.** It is 75 kB and only
+  its head is wanted. That works because the list is ordered nearest-first,
+  which the API documentation does not state — it was measured. The scan matches
+  the key alone and skips whitespace to the value: NWS pretty-prints, and a
+  literal `"stationIdentifier":"` appears nowhere in the document. That version
+  built cleanly and found zero stations.
+- **Observations are converted to US units at parse time.** The observations
+  endpoint reports SI while the forecast reports Fahrenheit, and every numeric
+  field needs a sentinel for "not reported" — nulls arrive individually and
+  routinely, on ordinary days.
+- **The pressure history is keyed on the station's own timestamp**, never on
+  when the fetch happened, which is what makes the poll interval a free
+  parameter. It lives in RAM, so it is blank for the first hours after every
+  boot — including after every OTA. That is the accepted cost of not writing to
+  flash on a schedule forever. A change of station discards it: station pressure
+  depends on elevation, and splicing two baselines reports the step as a
+  plummeting barometer.
 - **The fetch never runs on the console task.** `weather_refresh` notifies the
   weather task and returns. A handshake against the full certificate bundle
   plus a 14 kB parse is more stack than a console command has, and with stack
