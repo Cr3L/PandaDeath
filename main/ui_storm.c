@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "lvgl.h"
+#include "time_sync.h"
 #include "ui_palette.h"
 #include "weather.h"
 
@@ -29,13 +30,18 @@
  * everything actionable bunched at one end. */
 #define HORIZON_HOURS 48
 
-/* How often the screen re-reads the report.
+/* How often the screen re-reads the report and the clock.
  *
- * Sized against what the screen can actually show: format_eta prints whole
- * hours, and a new forecast lands every 30 minutes at most, so this is already
- * sixty times finer than the coarsest thing on the glass. It was 5 s, which
- * recomputed 720 times an hour to change one digit once. */
-#define REFRESH_MS 60000
+ * The forecast would be happy with minutes — a new one lands every half hour,
+ * and the ETA is printed in whole hours. The clock sets this instead: at 60 s
+ * the displayed minute could be a full minute stale, which is visibly wrong on
+ * a clock in a way a stale forecast is not.
+ *
+ * Ten seconds is affordable only because every label below is guarded against
+ * rewriting identical text. Without those guards this would be the 5 s version
+ * the review objected to, which freed and reallocated four label strings and
+ * invalidated their areas to redraw the same pixels. */
+#define REFRESH_MS 10000
 
 /* Long enough to read one at a glance and not so long it becomes furniture. */
 #define FACT_ROTATE_MS 12000
@@ -68,8 +74,8 @@ static const char *const FACTS[] = {
 #define FACT_WIDTH 140
 
 static lv_obj_t *s_arc;
+static lv_obj_t *s_clock;
 static lv_obj_t *s_temp;
-static lv_obj_t *s_conditions;
 static lv_obj_t *s_eta;
 static lv_obj_t *s_fact;
 
@@ -160,10 +166,30 @@ static void refresh_cb(lv_timer_t *timer)
 
     const time_t now = time(NULL);
 
+    /* The clock runs off the same tick as the forecast, and off the same guard.
+     * It is shown small and without a date on purpose: this is a storm watch
+     * that happens to know the time, not a clock. */
+    char clock[16] = "";
+    if (time_sync_synced()) {
+        struct tm local;
+        localtime_r(&now, &local);
+        strftime(clock, sizeof(clock), "%l:%M %p", &local);
+    }
+    /* %l space-pads a single-digit hour, which centres the label off by half a
+     * character against everything below it. */
+    const char *trimmed = clock;
+    while (*trimmed == ' ') {
+        trimmed++;
+    }
+    static char last_clock[16];
+    if (strcmp(last_clock, trimmed) != 0) {
+        strlcpy(last_clock, trimmed, sizeof(last_clock));
+        lv_label_set_text(s_clock, trimmed);
+    }
+
     if (r.fetched == 0) {
         lv_label_set_text(s_temp, "--");
-        lv_label_set_text(s_conditions, "waiting for a forecast");
-        lv_label_set_text(s_eta, "");
+        lv_label_set_text(s_eta, "waiting for a forecast");
         lv_arc_set_value(s_arc, 0);
         lv_obj_set_style_arc_color(s_arc, lv_color_hex(COLOR_TRACK), LV_PART_INDICATOR);
         return;
@@ -178,12 +204,6 @@ static void refresh_cb(lv_timer_t *timer)
     if (r.temperature != last_temp) {
         last_temp = r.temperature;
         lv_label_set_text_fmt(s_temp, "%d°%s", r.temperature, r.temperature_unit);
-    }
-
-    static char last_now[sizeof(r.now)];
-    if (strcmp(last_now, r.now) != 0) {
-        strlcpy(last_now, r.now, sizeof(last_now));
-        lv_label_set_text(s_conditions, r.now);
     }
 
     const uint32_t color = storm_color(r.storm);
@@ -244,31 +264,31 @@ void ui_storm_screen_build(void)
      * and overwritten without ever being seen. */
     lv_obj_set_style_arc_color(s_arc, lv_color_hex(COLOR_TRACK), LV_PART_MAIN);
 
+    s_clock = lv_label_create(scr);
+    lv_label_set_text(s_clock, "");
+    lv_obj_set_style_text_color(s_clock, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
+    lv_obj_align(s_clock, LV_ALIGN_CENTER, 0, -66);
+
     s_temp = lv_label_create(scr);
     lv_label_set_text(s_temp, "--");
     lv_obj_set_style_text_color(s_temp, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_temp, &lv_font_montserrat_28, LV_PART_MAIN);
-    lv_obj_align(s_temp, LV_ALIGN_CENTER, 0, -52);
-
-    s_conditions = lv_label_create(scr);
-    lv_label_set_long_mode(s_conditions, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_conditions, TEXT_WIDTH);
-    lv_obj_set_style_text_align(s_conditions, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(s_conditions, "waiting for a forecast");
-    lv_obj_set_style_text_color(s_conditions, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
-    lv_obj_align(s_conditions, LV_ALIGN_CENTER, 0, -18);
+    lv_obj_align(s_temp, LV_ALIGN_CENTER, 0, -32);
 
     s_eta = lv_label_create(scr);
+    lv_label_set_long_mode(s_eta, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_eta, TEXT_WIDTH);
+    lv_obj_set_style_text_align(s_eta, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(s_eta, "");
     lv_obj_set_style_text_color(s_eta, lv_color_hex(COLOR_CALM), LV_PART_MAIN);
-    lv_obj_align(s_eta, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(s_eta, LV_ALIGN_CENTER, 0, 6);
 
     s_fact = lv_label_create(scr);
     lv_label_set_long_mode(s_fact, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_fact, FACT_WIDTH);
     lv_obj_set_style_text_align(s_fact, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_fact, lv_color_hex(COLOR_FACT), LV_PART_MAIN);
-    lv_obj_align(s_fact, LV_ALIGN_CENTER, 0, 54);
+    lv_obj_align(s_fact, LV_ALIGN_CENTER, 0, 46);
 
     /* Both fire immediately as well as on their period, so the screen is
      * populated on the first frame rather than showing placeholders for the
