@@ -12,93 +12,52 @@
 
 /* Replies go through printf, not ESP_LOGI — same reasoning as wifi_cmd.c. */
 
-static int cmd_weather(int argc, char **argv)
+/* One table, rather than a command per source.
+ *
+ * The forecast, the instruments and the sun were three commands answering one
+ * question in three shapes, and reading them meant holding three layouts in
+ * your head to compare numbers that belong side by side. They are folded here.
+ *
+ * Column widths live in these two constants and nowhere else. A table whose
+ * widths are spelled out in a dozen format strings stays aligned exactly until
+ * someone adds a row, and the misalignment then looks like corrupted output
+ * rather than a missed edit. */
+#define WX_LABEL 12
+#define WX_VALUE 13
+
+/* Cell text. The widest thing any cell actually holds is "falling fast -12.3",
+ * around twenty characters; the rest is headroom the compiler insists on,
+ * because it cannot bound a unit string passed in as a pointer and treats a
+ * tight buffer as a truncation it must warn about. */
+typedef char wx_cell_t[40];
+
+static void wx_row(const char *label_a, const char *value_a,
+                   const char *label_b, const char *value_b)
 {
-    (void)argc;
-    (void)argv;
-
-    weather_report_t report;
-    weather_report_copy(&report);
-    const weather_report_t *r = &report;
-
-    /* Before the no-forecast branch, not after it. An alert is the one urgent
-     * thing this command can say, and it was briefly printed only once a
-     * forecast existed — so a live warning was hidden by the absence of the
-     * less important half. Found by pointing the board at a real warning. */
-    weather_alert_t alert;
-    weather_alert_copy(&alert);
-    if (alert.level != WEATHER_ALERT_NONE) {
-        printf("ALERT:   %s (%s%s)\n", alert.event,
-               weather_alert_level_name(alert.level),
-               alert.severe ? ", severe" : "");
-    }
-
-    if (r->fetched == 0) {
-        printf("no forecast yet\n");
-        /* The three things that stop one arriving, in the order worth checking.
-         * Without this the empty answer looks like a broken feature rather than
-         * a board that has not been told where it is. */
-        double lat, lon;
-        if (weather_location_get(&lat, &lon) != ESP_OK) {
-            printf("        no location set — try: loc 39.64 -84.28\n");
-        } else if (!time_sync_synced()) {
-            printf("        the clock is not set yet; TLS needs it — check time\n");
-        } else if (r->last_error != ESP_OK) {
-            printf("        last attempt: %s\n", esp_err_to_name(r->last_error));
-            /* The one failure a US-only service produces that looks like a
-             * network fault. Worth naming, because the coordinates are the
-             * thing to change and nothing else hints at that. */
-            if (r->last_error == ESP_ERR_NOT_FOUND ||
-                r->last_error == ESP_ERR_INVALID_RESPONSE) {
-                printf("        are those coordinates inside the United States?\n");
-            }
-        } else {
-            printf("        check wifi_status, then weather_refresh\n");
-        }
-        return 0;
-    }
-
-    printf("now:     %d%s, %s\n", r->temperature, r->temperature_unit, r->now);
-
-    if (r->storm == WEATHER_STORM_NONE) {
-        printf("storm:   none in the forecast\n");
-    } else {
-        printf("storm:   %s", weather_storm_name(r->storm));
-        if (r->pop >= 0) {
-            printf(" (%d%% precipitation)", r->pop);
-        }
-        printf("\n");
-        printf("when:    %s\n", r->when);
-        printf("outlook: %s\n", r->summary);
-    }
-
-    /* Age, not just the timestamp. A forecast is a claim about the future made
-     * at a point in the past, and "fetched 4 hours ago" is the part that says
-     * whether to believe it. */
-    const time_t now = time(NULL);
-    printf("fetched: %lld min ago\n", (long long)((now - r->fetched) / 60));
-    return 0;
+    printf("  %-*s %-*s %-*s %s\n", WX_LABEL, label_a, WX_VALUE, value_a,
+           WX_LABEL, label_b, value_b);
 }
 
-/* Prints an integer reading, or a dash where the station reported nothing.
- * Every numeric field needs this: on a clear day the nearest test station sent
- * four nulls alongside everything else, and a zero in their place would be a
- * reading no instrument made. */
-static void print_reading(const char *label, int value, const char *unit)
+/* A number with its unit, or a dash where the station reported nothing. Every
+ * numeric field needs this: on a clear day the nearest test station sent four
+ * nulls alongside everything else, and a zero in their place would be a reading
+ * no instrument ever made. */
+static void wx_number(wx_cell_t out, int value, const char *unit)
 {
     if (value == WEATHER_UNKNOWN) {
-        printf("  %-12s --\n", label);
+        snprintf(out, sizeof(wx_cell_t), "--");
     } else {
-        printf("  %-12s %d %s\n", label, value, unit);
+        snprintf(out, sizeof(wx_cell_t), "%d %s", value, unit);
     }
 }
 
 /* Degrees the wind blows from, as the compass point anyone would say out loud.
  *
- * Sixteen points of 22.5°, each name covering the arc *centred* on its bearing
- * rather than starting at it — so north runs from 348.75° round to 11.25°,
- * which is why the half-point offset is there. In integers that is
- * (deg + 11.25) / 22.5 scaled by four to clear the fractions. */
+ * Sixteen points of 22.5 degrees, each name covering the arc *centred* on its
+ * bearing rather than starting at it — so north runs from 348.75 round to
+ * 11.25, which is why the half-point offset is there. In integers that is
+ * (deg + 11.25) / 22.5 scaled by four to clear the fractions; the obvious form
+ * without the scaling puts 0 degrees in NNE. */
 static const char *compass(int degrees)
 {
     static const char *const POINTS[] = {
@@ -109,116 +68,186 @@ static const char *compass(int degrees)
     return POINTS[index < 0 ? 0 : index];
 }
 
-static int cmd_obs(int argc, char **argv)
+/* The trend in the words a barometer face has carried for two centuries, with
+ * the figure behind them. Thresholds are the marine convention: half a
+ * millibar over three hours is instrument noise, three is the fall that
+ * precedes weather. */
+static void wx_trend(wx_cell_t out, int trend)
+{
+    if (trend == WEATHER_UNKNOWN) {
+        snprintf(out, sizeof(wx_cell_t), "(collecting)");
+        return;
+    }
+    const int magnitude = trend < 0 ? -trend : trend;
+    const char *word = magnitude < 5   ? "steady"
+                     : magnitude >= 30 ? (trend < 0 ? "falling fast" : "rising fast")
+                     :                   (trend < 0 ? "falling" : "rising");
+    /* The sign is printed rather than left to %+d: a fall of three tenths has
+     * an integer part of zero, which %+d renders as "+0.3" for a barometer
+     * that is going down. */
+    snprintf(out, sizeof(wx_cell_t), "%s %c%d.%d", word,
+             trend < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
+}
+
+/* Local wall-clock time of a UTC instant, rounded to the nearest minute.
+ * strftime truncates, so a sunrise at 06:31:39 would print as 06:31 against
+ * every published table saying 06:32 — a minute of error introduced at the last
+ * step of arithmetic accurate to well under one. */
+static void wx_clock(wx_cell_t out, time_t utc)
+{
+    const time_t rounded = utc + 30;
+    struct tm local;
+    localtime_r(&rounded, &local);
+    strftime(out, sizeof(wx_cell_t), "%H:%M", &local);
+}
+
+static void wx_header(void)
+{
+    if (time_sync_synced()) {
+        const time_t now = time(NULL);
+        struct tm local;
+        localtime_r(&now, &local);
+        char stamp[32];
+        strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M %Z", &local);
+        printf("%-*s %s\n", WX_LABEL, "clock", stamp);
+    } else {
+        printf("%-*s not set\n", WX_LABEL, "clock");
+    }
+
+    double lat, lon;
+    if (weather_location_get(&lat, &lon) == ESP_OK) {
+        printf("%-*s %.4f, %.4f\n", WX_LABEL, "location", lat, lon);
+    } else {
+        printf("%-*s not set\n", WX_LABEL, "location");
+    }
+}
+
+static int cmd_wx(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
 
+    weather_report_t report;
     weather_obs_t obs;
+    weather_alert_t alert;
+    weather_report_copy(&report);
     weather_obs_copy(&obs);
+    weather_alert_copy(&alert);
+
+    const time_t now = time(NULL);
+
+    /* The alert first, above everything, because it is the one line here that
+     * is urgent. It was once printed only once a forecast existed, which hid a
+     * live warning behind the absence of the less important half. */
+    if (alert.level != WEATHER_ALERT_NONE) {
+        printf("** %s (%s%s)\n\n", alert.event,
+               weather_alert_level_name(alert.level),
+               alert.severe ? ", severe" : "");
+    }
+
+    wx_header();
+    printf("\n");
 
     if (obs.observed == 0) {
-        printf("no observation yet\n");
+        printf("  no reading yet");
         if (obs.last_error != ESP_OK) {
-            printf("        last attempt: %s\n", esp_err_to_name(obs.last_error));
+            printf(" (%s)", esp_err_to_name(obs.last_error));
+        }
+        printf("\n");
+    } else {
+        wx_cell_t temperature, feels, dewpoint, humidity;
+        wx_cell_t pressure, trend, wind, gust, visibility;
+
+        wx_number(temperature, obs.temperature, "F");
+        wx_number(feels, obs.feels_like, "F");
+        wx_number(dewpoint, obs.dewpoint, "F");
+        wx_number(humidity, obs.humidity, "%");
+        wx_number(pressure, obs.pressure, "mb");
+        wx_trend(trend, obs.pressure_trend);
+        wx_number(gust, obs.gust, "mph");
+        wx_number(visibility, obs.visibility, "mi");
+
+        if (obs.wind == WEATHER_UNKNOWN) {
+            snprintf(wind, sizeof(wind), "--");
+        } else if (obs.wind_direction == WEATHER_UNKNOWN) {
+            snprintf(wind, sizeof(wind), "%d mph", obs.wind);
+        } else {
+            snprintf(wind, sizeof(wind), "%s %d mph",
+                     compass(obs.wind_direction), obs.wind);
+        }
+
+        /* Whose reading this is, and how old — together, because they are one
+         * fact. A station reporting hourly is up to an hour stale the moment it
+         * is read, which is normal; without the age beside it a number that has
+         * not moved looks like a fault. */
+        printf("  %-*s %s, %lld min ago\n", WX_LABEL, "station", obs.station,
+               (long long)((now - obs.observed) / 60));
+
+        wx_row("temperature", temperature, "dewpoint", dewpoint);
+        wx_row("feels like", feels, "humidity", humidity);
+        wx_row("wind", wind, "gusts", gust);
+        wx_row("pressure", pressure, "trend", trend);
+        wx_row("visibility", visibility, "conditions",
+               obs.text[0] != '\0' ? obs.text : "--");
+    }
+
+    /* Needs no network, only the date — so it is printed whenever the clock is
+     * set, including when every fetch above has failed. */
+    double lat, lon;
+    if (time_sync_synced() && weather_location_get(&lat, &lon) == ESP_OK) {
+        time_t rise, set;
+        if (sun_times(lat, lon, now, &rise, &set) == ESP_OK) {
+            wx_cell_t rise_text, set_text, daylight;
+            wx_clock(rise_text, rise);
+            wx_clock(set_text, set);
+            const long span = (long)(set - rise);
+            snprintf(daylight, sizeof(daylight), "%ldh %02ldm",
+                     span / 3600, (span % 3600) / 60);
+            printf("\n");
+            wx_row("sunrise", rise_text, "sunset", set_text);
+            printf("  %-*s %s\n", WX_LABEL, "daylight", daylight);
+        }
+    }
+
+    printf("\n");
+    if (report.fetched == 0) {
+        printf("%-*s none yet\n", WX_LABEL, "forecast");
+        /* The three things that stop one arriving, in the order worth checking.
+         * Without this the empty answer looks like a broken feature rather than
+         * a board that has not been told where it is. */
+        if (weather_location_get(&lat, &lon) != ESP_OK) {
+            printf("%-*s no location — try: loc 39.64 -84.28\n", WX_LABEL, "");
+        } else if (!time_sync_synced()) {
+            printf("%-*s the clock is not set; TLS needs it\n", WX_LABEL, "");
+        } else if (report.last_error != ESP_OK) {
+            printf("%-*s last attempt: %s\n", WX_LABEL, "",
+                   esp_err_to_name(report.last_error));
+            /* The one failure a US-only service produces that looks like a
+             * network fault. Worth naming, because the coordinates are the
+             * thing to change and nothing else hints at that. */
+            if (report.last_error == ESP_ERR_NOT_FOUND ||
+                report.last_error == ESP_ERR_INVALID_RESPONSE) {
+                printf("%-*s are those coordinates inside the United States?\n",
+                       WX_LABEL, "");
+            }
+        } else {
+            printf("%-*s check wifi_status, then weather_refresh\n", WX_LABEL, "");
         }
         return 0;
     }
 
-    /* The station's own reading time, and its age. A station reporting hourly
-     * is up to an hour stale the moment it is read, which is normal — without
-     * the age beside it, a number that has not moved looks like a bug. */
-    const time_t now = time(NULL);
-    printf("station: %s, %lld min ago\n", obs.station,
-           (long long)((now - obs.observed) / 60));
-    if (obs.text[0] != '\0') {
-        printf("  %-12s %s\n", "conditions", obs.text);
-    }
-
-    print_reading("temperature", obs.temperature, "F");
-    print_reading("feels like", obs.feels_like, "F");
-    print_reading("dewpoint", obs.dewpoint, "F");
-    print_reading("humidity", obs.humidity, "%");
-    /* Pressure and its trend on one line, because the number alone is inert.
-     * The words are the ones a barometer face has carried for two centuries;
-     * the thresholds are the marine convention — half a millibar over three
-     * hours is instrument noise, three is the fall that precedes weather. */
-    if (obs.pressure == WEATHER_UNKNOWN) {
-        printf("  %-12s --\n", "pressure");
-    } else if (obs.pressure_trend == WEATHER_UNKNOWN) {
-        printf("  %-12s %d mb (trend needs more readings)\n", "pressure", obs.pressure);
+    if (report.storm == WEATHER_STORM_NONE) {
+        printf("%-*s none in the forecast\n", WX_LABEL, "storm");
     } else {
-        const int t = obs.pressure_trend;
-        const int magnitude = t < 0 ? -t : t;
-        const char *word = magnitude < 5  ? "steady"
-                         : magnitude >= 30 ? (t < 0 ? "falling fast" : "rising fast")
-                         :                   (t < 0 ? "falling" : "rising");
-        /* The sign is printed, not derived from the integer part: a fall of
-         * three tenths has an integer part of zero, and %+d on that gives "+0.3"
-         * for a barometer that is going down. */
-        printf("  %-12s %d mb, %s (%c%d.%d mb/3h)\n", "pressure", obs.pressure,
-               word, t < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
+        printf("%-*s %s", WX_LABEL, "storm", weather_storm_name(report.storm));
+        if (report.pop >= 0) {
+            printf(", %d%% precipitation", report.pop);
+        }
+        printf(" — %s\n", report.when);
+        printf("%-*s %s\n", WX_LABEL, "outlook", report.summary);
     }
-
-    if (obs.wind == WEATHER_UNKNOWN) {
-        printf("  %-12s --\n", "wind");
-    } else if (obs.wind_direction == WEATHER_UNKNOWN) {
-        printf("  %-12s %d mph\n", "wind", obs.wind);
-    } else {
-        printf("  %-12s %s %d mph\n", "wind", compass(obs.wind_direction), obs.wind);
-    }
-    print_reading("gusts", obs.gust, "mph");
-    print_reading("visibility", obs.visibility, "mi");
-    return 0;
-}
-
-/* Lives here rather than in a sun_cmd.c because sun.c holds no state at all —
- * it is a function of coordinates and a date. The only state involved is the
- * location, which belongs to this module, so this is where the command that
- * reads it belongs. */
-static int cmd_sun(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-
-    double lat, lon;
-    if (weather_location_get(&lat, &lon) != ESP_OK) {
-        printf("no location set — try: loc 39.64 -84.28\n");
-        return 1;
-    }
-    /* No network needed, but the date is still required, and an unsynced board
-     * would confidently report the sunrise of 1 January 1970. */
-    if (!time_sync_synced()) {
-        printf("the clock is not set yet — check time\n");
-        return 1;
-    }
-
-    const time_t now = time(NULL);
-    time_t rise, set;
-    if (sun_times(lat, lon, now, &rise, &set) != ESP_OK) {
-        printf("the sun neither rises nor sets there today\n");
-        return 0;
-    }
-
-    /* Rounded to the nearest minute, not truncated to it. strftime discards the
-     * seconds, so a sunrise at 06:31:39 prints as 06:31 while every published
-     * table says 06:32 — an apparent one-minute error in code that is accurate
-     * to well under that. */
-    rise += 30;
-    set += 30;
-
-    struct tm tm_rise, tm_set;
-    localtime_r(&rise, &tm_rise);
-    localtime_r(&set, &tm_set);
-    char rise_text[16], set_text[16];
-    strftime(rise_text, sizeof(rise_text), "%H:%M", &tm_rise);
-    strftime(set_text, sizeof(set_text), "%H:%M", &tm_set);
-
-    printf("sunrise: %s\n", rise_text);
-    printf("sunset:  %s\n", set_text);
-
-    const long daylight = (long)(set - rise);
-    printf("daylight: %ldh %02ldm\n", daylight / 3600, (daylight % 3600) / 60);
+    printf("%-*s %lld min ago\n", WX_LABEL, "forecast",
+           (long long)((now - report.fetched) / 60));
     return 0;
 }
 
@@ -236,7 +265,7 @@ static int cmd_weather_refresh(int argc, char **argv)
     /* Asked for, not performed. The fetch runs on the weather task because a
      * TLS handshake needs more stack than this one has — so this cannot report
      * the result, and says so rather than implying the data is ready. */
-    printf("requested; run weather in a few seconds\n");
+    printf("requested; run wx in a few seconds\n");
     return 0;
 }
 
@@ -303,19 +332,9 @@ static int cmd_loc(int argc, char **argv)
 
 static const esp_console_cmd_t COMMANDS[] = {
     {
-        .command = "weather",
-        .help = "Show the last forecast and how close a thunderstorm is",
-        .func = cmd_weather,
-    },
-    {
-        .command = "sun",
-        .help = "Sunrise and sunset for the stored location",
-        .func = cmd_sun,
-    },
-    {
-        .command = "obs",
-        .help = "Show the latest reading from the nearest station",
-        .func = cmd_obs,
+        .command = "wx",
+        .help = "Everything: readings, sun, forecast, alerts",
+        .func = cmd_wx,
     },
     {
         .command = "weather_refresh",
