@@ -179,6 +179,18 @@ static int64_t s_last_obs_ms;
 static char s_forecast_url[URL_MAX];
 static char s_stations_url[URL_MAX];
 
+/* The coordinates, cached after the first read.
+ *
+ * weather_location_get is called from the UI refresh, which runs every ten
+ * seconds, and it used to open NVS, read a string and close it every time — a
+ * blocking flash access on the task driving the display, thousands of times a
+ * day, for a value that changes only when someone types `loc`. The store stays
+ * the source of truth; this is just the answer, kept. weather_location_set
+ * updates it, which is the only way it can go stale. */
+static bool s_location_cached;
+static double s_latitude;
+static double s_longitude;
+
 /* Nearest observation stations, nearest first, empty strings for unresolved.
  * Derived from s_stations_url and cleared alongside it. */
 static char s_stations[WEATHER_STATION_COUNT][WEATHER_STATION_ID_MAX];
@@ -660,8 +672,12 @@ static esp_err_t parse_observation(const char *body, weather_obs_t *out, int *pr
     o.temperature    = obs_int(props, "temperature", C_TO_F_SCALE, C_TO_F_OFFSET);
     o.dewpoint       = obs_int(props, "dewpoint", C_TO_F_SCALE, C_TO_F_OFFSET);
     o.humidity       = obs_int(props, "relativeHumidity", 1.0, 0.0);
-    o.pressure       = obs_int(props, "barometricPressure", PA_TO_MB, 0.0);
+    /* Read once and rounded once. The whole-millibar figure is the tenths
+     * rounded again, not a second look at the same JSON field. */
     *pressure_tenths = obs_int(props, "barometricPressure", PA_TO_MB * 10.0, 0.0);
+    o.pressure = (*pressure_tenths == WEATHER_UNKNOWN)
+                 ? WEATHER_UNKNOWN
+                 : (int)lround(*pressure_tenths / 10.0);
     o.pressure_trend = WEATHER_UNKNOWN;   /* filled by the caller, which owns the history */
     o.wind           = obs_int(props, "windSpeed", KMH_TO_MPH, 0.0);
     o.gust           = obs_int(props, "windGust", KMH_TO_MPH, 0.0);
@@ -1125,6 +1141,10 @@ esp_err_t weather_location_set(double lat, double lon)
     nvs_close(handle);
 
     if (err == ESP_OK) {
+        s_latitude = lat;
+        s_longitude = lon;
+        s_location_cached = true;
+
         /* The cached grid square belongs to the old coordinates. Clearing it
          * here rather than recomputing keeps this function free of network
          * work — the next poll resolves it, and fails visibly if it cannot. */
@@ -1160,6 +1180,12 @@ esp_err_t weather_location_set(double lat, double lon)
 
 esp_err_t weather_location_get(double *lat, double *lon)
 {
+    if (s_location_cached) {
+        *lat = s_latitude;
+        *lon = s_longitude;
+        return ESP_OK;
+    }
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
@@ -1180,5 +1206,9 @@ esp_err_t weather_location_get(double *lat, double *lon)
     if (sscanf(value, "%lf,%lf", lat, lon) != 2) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    s_latitude = *lat;
+    s_longitude = *lon;
+    s_location_cached = true;
     return ESP_OK;
 }

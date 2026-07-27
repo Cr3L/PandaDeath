@@ -314,18 +314,10 @@ static void update_readings(const weather_obs_t *obs, time_t now)
         time_t rise, set;
         if (sun_times(lat, lon, now, &rise, &set) == ESP_OK) {
             const bool before_rise = now < rise;
-            const time_t next = before_rise ? rise : set;
-            struct tm local;
-            const time_t rounded = next + 30;   /* strftime truncates */
-            localtime_r(&rounded, &local);
             char when[12];
-            strftime(when, sizeof(when), "%l:%M", &local);
-            const char *trimmed = when;
-            while (*trimmed == ' ') {
-                trimmed++;
-            }
+            time_clock(before_rise ? rise : set, "%l:%M", when, sizeof(when));
             snprintf(bottom, sizeof(bottom), "%s %s",
-                     before_rise ? "sunrise" : "sunset", trimmed);
+                     before_rise ? "sunrise" : "sunset", when);
         }
     }
 
@@ -435,18 +427,10 @@ static void refresh_cb(lv_timer_t *timer)
      * that happens to know the time, not a clock. */
     char clock[16] = "";
     if (time_sync_synced()) {
-        struct tm local;
-        localtime_r(&now, &local);
-        strftime(clock, sizeof(clock), "%l:%M %p", &local);
-    }
-    /* %l space-pads a single-digit hour, which centres the label off by half a
-     * character against everything below it. */
-    const char *trimmed = clock;
-    while (*trimmed == ' ') {
-        trimmed++;
+        time_clock(now, "%l:%M %p", clock, sizeof(clock));
     }
     static char last_clock[16];
-    set_text_if_changed(s_clock, last_clock, sizeof(last_clock), trimmed);
+    set_text_if_changed(s_clock, last_clock, sizeof(last_clock), clock);
 
     weather_obs_t obs;
     weather_obs_copy(&obs);
@@ -527,6 +511,20 @@ static void refresh_cb(lv_timer_t *timer)
     lv_obj_set_style_text_color(s_sub, lv_color_hex(color), LV_PART_MAIN);
 }
 
+/* One of the three evidence lines. They differ only in where they sit, and
+ * spelling all five calls out three times meant a style change had to be made
+ * identically in three places or the lines would quietly stop matching. */
+static lv_obj_t *make_reading(lv_obj_t *parent, int y)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_width(label, READING_WIDTH);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(label, "");
+    lv_obj_set_style_text_color(label, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, y);
+    return label;
+}
+
 void ui_storm_screen_build(void)
 {
     lv_obj_t *scr = lv_screen_active();
@@ -592,26 +590,9 @@ void ui_storm_screen_build(void)
     lv_obj_center(s_takeover);
     lv_obj_add_flag(s_takeover, LV_OBJ_FLAG_HIDDEN);
 
-    s_reading_top = lv_label_create(scr);
-    lv_obj_set_width(s_reading_top, READING_WIDTH);
-    lv_obj_set_style_text_align(s_reading_top, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(s_reading_top, "");
-    lv_obj_set_style_text_color(s_reading_top, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
-    lv_obj_align(s_reading_top, LV_ALIGN_CENTER, 0, Y_READ_TOP);
-
-    s_reading_mid = lv_label_create(scr);
-    lv_obj_set_width(s_reading_mid, READING_WIDTH);
-    lv_obj_set_style_text_align(s_reading_mid, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(s_reading_mid, "");
-    lv_obj_set_style_text_color(s_reading_mid, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
-    lv_obj_align(s_reading_mid, LV_ALIGN_CENTER, 0, Y_READ_MID);
-
-    s_reading_bottom = lv_label_create(scr);
-    lv_obj_set_width(s_reading_bottom, READING_WIDTH);
-    lv_obj_set_style_text_align(s_reading_bottom, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(s_reading_bottom, "");
-    lv_obj_set_style_text_color(s_reading_bottom, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
-    lv_obj_align(s_reading_bottom, LV_ALIGN_CENTER, 0, Y_READ_BOT);
+    s_reading_top = make_reading(scr, Y_READ_TOP);
+    s_reading_mid = make_reading(scr, Y_READ_MID);
+    s_reading_bottom = make_reading(scr, Y_READ_BOT);
 
     /* Fires immediately as well as on its period, so the screen is populated on
      * the first frame rather than showing placeholders for ten seconds. One

@@ -54,6 +54,23 @@ esp_err_t time_sync_start(void);
  * function. */
 void time_format(time_t t, bool utc, char *buf, size_t len);
 
+/* Formats a time as a wall clock, rounded to the nearest minute rather than
+ * truncated to it, with any leading space removed.
+ *
+ * Both halves of that are corrections to strftime rather than preferences.
+ * strftime discards the seconds, so 06:31:39 prints as 06:31 against every
+ * published table saying 06:32 — a minute of error added at the last step of
+ * arithmetic accurate to well under one. And %l pads a single-digit hour with a
+ * space, which centres a label half a character off from everything beneath it.
+ *
+ * `format` must not ask for seconds; rounding the minute makes them a lie.
+ *
+ * Here for the same reason time_format is: this was independently rediscovered
+ * and written out four times across two files — the +30, the localtime_r, the
+ * strftime, the trim — each with its own copy of the comment explaining why.
+ * This module owns the timezone, so it owns rendering a local wall clock. */
+void time_clock(time_t t, const char *format, char *buf, size_t len);
+
 /* True once the clock has been set from the network at least once. False means
  * the time is the epoch and should not be shown as a time. */
 bool time_sync_synced(void);

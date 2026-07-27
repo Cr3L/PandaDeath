@@ -147,6 +147,24 @@ esp_err_t time_sync_start(void)
     return ESP_OK;
 }
 
+void time_clock(time_t t, const char *format, char *buf, size_t len)
+{
+    const time_t rounded = t + 30;
+    struct tm tm;
+    localtime_r(&rounded, &tm);
+    strftime(buf, len, format, &tm);
+
+    /* In place, so callers keep the buffer they passed rather than a pointer
+     * into its middle that they have to remember not to free or reuse. */
+    size_t lead = 0;
+    while (buf[lead] == ' ') {
+        lead++;
+    }
+    if (lead > 0) {
+        memmove(buf, buf + lead, strlen(buf + lead) + 1);
+    }
+}
+
 bool time_sync_synced(void)
 {
     return s_last != 0;

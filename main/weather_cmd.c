@@ -89,26 +89,13 @@ static void wx_trend(wx_cell_t out, int trend)
              trend < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
 }
 
-/* Local wall-clock time of a UTC instant, rounded to the nearest minute.
- * strftime truncates, so a sunrise at 06:31:39 would print as 06:31 against
- * every published table saying 06:32 — a minute of error introduced at the last
- * step of arithmetic accurate to well under one. */
-static void wx_clock(wx_cell_t out, time_t utc)
-{
-    const time_t rounded = utc + 30;
-    struct tm local;
-    localtime_r(&rounded, &local);
-    strftime(out, sizeof(wx_cell_t), "%H:%M", &local);
-}
-
 static void wx_header(void)
 {
     if (time_sync_synced()) {
-        const time_t now = time(NULL);
-        struct tm local;
-        localtime_r(&now, &local);
+        /* Not time_format(): that one carries seconds, which are noise in a
+         * table read at a glance and would be a lie next to a rounded minute. */
         char stamp[32];
-        strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M %Z", &local);
+        time_clock(time(NULL), "%Y-%m-%d %H:%M %Z", stamp, sizeof(stamp));
         printf("%-*s %s\n", WX_LABEL, "clock", stamp);
     } else {
         printf("%-*s not set\n", WX_LABEL, "clock");
@@ -198,8 +185,8 @@ static int cmd_wx(int argc, char **argv)
         time_t rise, set;
         if (sun_times(lat, lon, now, &rise, &set) == ESP_OK) {
             wx_cell_t rise_text, set_text, daylight;
-            wx_clock(rise_text, rise);
-            wx_clock(set_text, set);
+            time_clock(rise, "%H:%M", rise_text, sizeof(rise_text));
+            time_clock(set, "%H:%M", set_text, sizeof(set_text));
             const long span = (long)(set - rise);
             snprintf(daylight, sizeof(daylight), "%ldh %02ldm",
                      span / 3600, (span % 3600) / 60);
