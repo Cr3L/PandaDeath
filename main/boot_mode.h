@@ -21,5 +21,14 @@
 #define BOOT_MODE_SELFTEST    0
 #define BOOT_MODE_TEST_SCREEN 1
 #define BOOT_MODE_ZOO         2
+#define BOOT_MODE_STORM       3
 
-#define BOOT_MODE BOOT_MODE_ZOO
+/* STORM is a peer of ZOO, not its successor, and the ladder metaphor stops
+ * being exact here — worth stating rather than papering over, because the
+ * ladder's value is that stepping down changes one thing.
+ *
+ * ZOO adds sprites to LVGL. STORM adds the network to LVGL and uses no sprites
+ * at all, so STORM -> ZOO swaps two variables at once and does not bisect
+ * anything. To isolate a fault under the storm screen, step to TEST_SCREEN,
+ * which is genuinely below both: LVGL with no assets and no network. */
+#define BOOT_MODE BOOT_MODE_STORM

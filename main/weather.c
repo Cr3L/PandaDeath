@@ -1,5 +1,6 @@
 #include "weather.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,13 +72,14 @@ static const char *TAG = "weather";
  * room to spare. */
 #define URL_MAX 160
 
-/* Written by the weather task, read by whoever asks. Unsynchronised, which is
- * fine for a console command reading it a few times a day — a torn read costs
- * one wrong line — but is worth revisiting before a screen reads it every
- * frame. Noted here rather than solved, because the right shape depends on what
- * the UI ends up wanting. */
 static weather_report_t s_report;
 static TaskHandle_t s_task;
+
+/* Guards s_report. The poll task writes it whole, and the screen reads it
+ * whole; without this a fetch landing mid-read puts a temperature from the new
+ * report beside a storm time from the old one, which is not a stale forecast
+ * but an invented one. */
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /* Consecutive not-ready wakeups, so a board that will never be ready stops
  * asking every two seconds forever. */
@@ -205,6 +207,54 @@ static esp_err_t resolve_forecast_url(char *buf, size_t len)
     return err;
 }
 
+/* Days since 1970-01-01 for a proleptic Gregorian date — Howard Hinnant's
+ * civil-from-days algorithm, which is exact for any date this will ever see and
+ * needs no lookup table or leap-year special case. The shift by three months
+ * puts the leap day at the end of the year, which is what removes the special
+ * case. */
+static int64_t days_from_civil(int y, unsigned m, unsigned d)
+{
+    y -= (m <= 2);
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2u) / 5u + d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return (int64_t)era * 146097LL + (int64_t)doe - 719468LL;
+}
+
+/* Converts an ISO 8601 timestamp with a numeric offset — "2026-07-26T22:00:00-05:00",
+ * which is the only form NWS emits — to epoch seconds. 0 on anything else.
+ *
+ * Hand-rolled because strptime cannot read the offset: %z is a glibc extension
+ * that newlib does not implement, and without it the timestamp would be taken
+ * as local, putting the answer out by the board's own timezone offset. */
+static time_t parse_iso8601(const char *s)
+{
+    int year, month, day, hour, minute, second, off_hour, off_minute;
+    char sign;
+
+    if (s == NULL) {
+        return 0;
+    }
+    if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%c%2d:%2d",
+               &year, &month, &day, &hour, &minute, &second,
+               &sign, &off_hour, &off_minute) != 9) {
+        return 0;
+    }
+    if (sign != '+' && sign != '-') {
+        return 0;
+    }
+
+    /* Converted arithmetically rather than with mktime, which would apply the
+     * board's TZ to fields that are already at the offset the string states —
+     * putting the answer out by the local UTC offset, four hours here, which is
+     * small enough to look plausible on a dial. timegm would be the right call
+     * and this toolchain's libc does not provide one. */
+    const int64_t days = days_from_civil(year, month, day);
+    return (time_t)(days * 86400LL + hour * 3600 + minute * 60 + second
+                    - ((sign == '-') ? -1 : 1) * ((off_hour * 3600) + (off_minute * 60)));
+}
+
 /* Reads probabilityOfPrecipitation, which is an object holding a value that is
  * null as often as it is a number. Returns -1 for "not stated", which is not
  * the same as zero and should not be shown as one. */
@@ -277,6 +327,9 @@ static esp_err_t parse_forecast(const char *body, weather_report_t *out)
             const cJSON *name = cJSON_GetObjectItemCaseSensitive(period, "name");
             const int pop = period_pop(period);
 
+            const cJSON *start = cJSON_GetObjectItemCaseSensitive(period, "startTime");
+            r.starts_at = parse_iso8601(cJSON_IsString(start) ? start->valuestring : NULL);
+
             r.periods_ahead = index;
             r.pop = pop;
             if (cJSON_IsString(name) && name->valuestring != NULL) {
@@ -296,6 +349,11 @@ static esp_err_t parse_forecast(const char *body, weather_report_t *out)
     }
 
     r.fetched = time(NULL);
+
+    /* Filled without locking. This function knows nothing about which object it
+     * is writing, so taking a lock that guards one particular global would be
+     * correct only for the caller that happens to pass it — publishing is the
+     * caller's job, and poll_once() does it by name. */
     *out = r;
     err = ESP_OK;
 
@@ -315,11 +373,22 @@ static esp_err_t poll_once(void)
     char *body = malloc(RESPONSE_MAX);
     ESP_RETURN_ON_FALSE(body != NULL, ESP_ERR_NO_MEM, TAG, "no memory");
 
+    weather_report_t parsed;
     esp_err_t err = fetch(s_forecast_url, body, RESPONSE_MAX);
     if (err == ESP_OK) {
-        err = parse_forecast(body, &s_report);
+        err = parse_forecast(body, &parsed);
     }
     free(body);
+
+    /* Published in one assignment under the lock, so a reader sees either the
+     * whole old report or the whole new one — never a temperature from this
+     * fetch beside a storm time from the last. Parsing happens off to the side
+     * precisely so the critical section is a struct copy and nothing else. */
+    if (err == ESP_OK) {
+        portENTER_CRITICAL(&s_lock);
+        s_report = parsed;
+        portEXIT_CRITICAL(&s_lock);
+    }
     return err;
 }
 
@@ -344,7 +413,9 @@ static void weather_task(void *arg)
         } else {
             s_not_ready_polls = 0;
             esp_err_t err = poll_once();
+            portENTER_CRITICAL(&s_lock);
             s_report.last_error = err;
+            portEXIT_CRITICAL(&s_lock);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "poll failed: %s", esp_err_to_name(err));
                 /* The previous report is left standing. Stale weather with a
@@ -386,9 +457,11 @@ esp_err_t weather_refresh(void)
     return ESP_OK;
 }
 
-const weather_report_t *weather_report(void)
+void weather_report_copy(weather_report_t *out)
 {
-    return &s_report;
+    portENTER_CRITICAL(&s_lock);
+    *out = s_report;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 esp_err_t weather_location_set(double lat, double lon)
@@ -416,7 +489,9 @@ esp_err_t weather_location_set(double lat, double lon)
          * here rather than recomputing keeps this function free of network
          * work — the next poll resolves it, and fails visibly if it cannot. */
         s_forecast_url[0] = '\0';
+        portENTER_CRITICAL(&s_lock);
         s_report.fetched = 0;
+        portEXIT_CRITICAL(&s_lock);
     }
     return err;
 }

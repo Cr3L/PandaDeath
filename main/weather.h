@@ -53,6 +53,13 @@ typedef struct {
 
     weather_storm_t storm;
     int periods_ahead;          /* 12-hour periods until the storm; 0 = now */
+
+    /* When the stormy period begins, 0 if no storm is forecast. Parsed from the
+     * period's ISO 8601 startTime rather than inferred from periods_ahead,
+     * because the periods are not a uniform twelve hours — the first one runs
+     * from now until the next boundary, so "two periods ahead" is anywhere from
+     * twelve to thirty-six hours away. */
+    time_t starts_at;
     int pop;                    /* probability of precipitation, percent, -1 unknown */
     char when[24];              /* the period's own name: "Monday Night" */
     char summary[64];           /* that period's shortForecast */
@@ -75,8 +82,15 @@ esp_err_t weather_start(void);
  * module that owns the poll interval rather than to whoever asked. */
 esp_err_t weather_refresh(void);
 
-/* The last report. Never NULL; `fetched` is 0 until one arrives. */
-const weather_report_t *weather_report(void);
+/* A consistent snapshot, taken under the lock the poll task writes behind.
+ * `fetched` is 0 until a report has arrived.
+ *
+ * The only accessor. There was briefly a second returning the live struct,
+ * with a comment conceding it was safe for the console and unsafe for the
+ * screen — a rule enforced by prose, on a codebase that otherwise deletes the
+ * shape which makes the wrong thing representable. Copying ~200 bytes costs
+ * well under a microsecond, so there was nothing to trade for the risk. */
+void weather_report_copy(weather_report_t *out);
 
 /* Coordinates, stored in NVS.
  *

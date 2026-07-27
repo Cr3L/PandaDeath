@@ -16,7 +16,10 @@ static int cmd_weather(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    const weather_report_t *r = weather_report();
+    weather_report_t report;
+    weather_report_copy(&report);
+    const weather_report_t *r = &report;
+
     if (r->fetched == 0) {
         printf("no forecast yet\n");
         /* The three things that stop one arriving, in the order worth checking.
