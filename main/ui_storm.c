@@ -25,7 +25,11 @@
  * 196, 109, 23 — so the progression is one channel walking down, and each step
  * is large enough to survive the panel and the room. */
 #define COLOR_LIKELY   0xFF6D00  /* deep orange: storms mentioned, high probability */
-#define COLOR_NOW      0xFF1744  /* crimson: it is happening in this period */
+/* Blue at zero, not 0x44. The comment above claims all three storm colours hold
+ * red at full and separate only on green — this one quietly carried a blue
+ * channel too, which is what made it read pink rather than red on the glass.
+ * Removing it makes the value match the rule the palette already stated. */
+#define COLOR_NOW      0xFF1700  /* red: it is happening in this period */
 #define COLOR_TRACK    UI_COLOR_TRACK
 /* Secondary text: the clock above the headline and the readings below it. One
  * name, because they are one role — a second constant holding the same value
