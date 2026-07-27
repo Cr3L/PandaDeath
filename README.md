@@ -3,9 +3,12 @@
 Custom firmware for the **BigTreeTech Knomi V1** — an ESP32-WROVER-E board with
 a 240×240 round GC9A01 display, originally a Klipper printer monitor.
 
-The stock Knomi firmware has been replaced and is not being kept. What the board
-eventually *does* is still undecided; what exists is a working display stack, a
-serial console, and the storage half of Wi-Fi.
+The stock Knomi firmware has been replaced and is not being kept.
+
+The foundation is finished: display, LVGL, a serial console, Wi-Fi, a
+network-set clock, and firmware updates over the air with automatic rollback.
+What the board eventually *does* with all that is still undecided — it currently
+shows four animals.
 
 Built on ESP-IDF's native `esp_lcd` stack rather than Arduino/TFT_eSPI, so the
 concepts carry over to other ESP32 boards. Only the pin numbers came from BTT.
@@ -31,6 +34,8 @@ Verified on hardware:
   and reverts on the next reset if it never does, so a bad update costs a reboot
   rather than a cable. Verified by installing an image built deliberately not to
   confirm itself and watching it roll back.
+- **Stack smashing protection**, turned on when the HTTP client arrived and the
+  reason to defer it expired.
 
 Not done: anything that uses the network for a purpose. The board knows who it
 is, where it is on the network and what time it is, and shows none of it — the
@@ -78,7 +83,52 @@ idf.py set-target esp32     # first time only
 idf.py build
 ```
 
-## Flashing — read this first
+## Updating over the air
+
+**This is the normal way to update the board.** Serve the build directory from
+the machine that compiled it:
+
+```sh
+cd build && python3 -m http.server 8000
+```
+
+Then, from the console:
+
+```
+panda> ota http://192.168.1.50:8000/pandadeath.bin
+panda> reboot
+```
+
+(`panda>` is printed by the board, not typed.) Or without a terminal:
+
+```sh
+python3 tools/console.py --timeout 180 "ota http://192.168.1.50:8000/pandadeath.bin"
+```
+
+`--timeout` is required — the default 5 s ceiling is shorter than the download.
+
+The image is written to whichever of the two app slots is *not* running, so a
+failure part way through costs nothing; the running firmware is never touched.
+`ota_status` reports the running slot, and prints a `next:` line when an
+installed update is waiting for a reboot.
+
+### Rollback
+
+A freshly installed image boots **on probation**. It confirms itself only once
+it obtains an IP address; if it never does, the next reset reverts to the slot
+it replaced.
+
+That criterion is deliberate. The state this must never leave the board in is
+"new image runs but cannot reach the network", because no further update can fix
+it — that one costs the USB cable, which is the thing OTA exists to avoid. The
+accepted cost is the mirror image: a good update installed while the router
+happens to be down gets rolled back for no reason, reverting to firmware that
+also cannot reach the network. Nothing is lost but the update.
+
+## Flashing by wire — first boards and recovery
+
+Needed for a board that has never run this firmware, and if both slots are ever
+unbootable. Not part of the normal loop.
 
 **This board has no working auto-reset.** DTR/RTS are not wired to EN/GPIO0, so
 esptool cannot enter download mode on its own. Every flash fails with
@@ -144,11 +194,23 @@ that prints on a timer walks over whatever is being typed. Hence the rule that
 **nothing periodic logs above `DEBUG`**, which is compiled out at the current
 log level.
 
-`console.c` owns the REPL and **no commands at all**. Commands live with the
-module whose state they touch — the `wifi_*` commands are in `wifi_cmd.c`, next
-to the credential store they drive. A console that `#include`d every feature it
-can drive would depend on all of them just to start. `main.c` registers commands
-before starting the REPL, so the prompt never offers one that does not exist yet.
+`console.c` owns the REPL and **no commands at all** — only the loop that
+registers them. Commands live with the module whose state they touch: `wifi_*`
+in `wifi_cmd.c` next to the credential store, `time`/`tz` in `time_cmd.c`,
+`ota`/`ota_status`/`reboot` in `ota_cmd.c`. A console that `#include`d every
+feature it can drive would depend on all of them just to start. `main.c`
+registers commands before starting the REPL, so the prompt never offers one that
+does not exist yet.
+
+| Command | |
+|---|---|
+| `wifi_set` / `wifi_show` / `wifi_clear` | credentials, below |
+| `wifi_status` | state, IP and signal strength |
+| `time` | UTC, local time, zone, and when the clock was last set |
+| `tz [<posix tz>]` | show or set the timezone, e.g. `tz EST5EDT,M3.2.0,M11.1.0` |
+| `ota <url>` | install firmware into the inactive slot |
+| `ota_status` | running slot, version, and whether it is confirmed |
+| `reboot` | restart |
 
 For scripted use without a terminal:
 
@@ -181,13 +243,13 @@ hand the password back. That is the layer the secret actually lives in.
 ## Flash layout
 
 [`partitions.csv`](partitions.csv) is sized for OTA — two 4 MB app slots against
-a ~0.6 MB image. That is not speculation about growth; it is because this board
-is *awkward to flash by wire*, so an over-the-air path removes the manual gesture
-from the normal loop once Wi-Fi runs.
+a ~1.5 MB image, plus an 8 MB `storage` partition not yet mounted. The slack is
+not speculation about growth; it is because this board is *awkward to flash by
+wire*, so an over-the-air path removes the manual gesture from the normal loop.
 
-It was laid out **before** Wi-Fi on purpose. Changing the map once `nvs` and
-`otadata` hold real data means erasing the chip, which takes the credentials with
-it.
+It was laid out **before** Wi-Fi on purpose, two sessions before anything could
+use it. Changing the map once `nvs` and `otadata` hold real data means erasing
+the chip, which takes the credentials with it.
 
 ## Panel quirks
 
@@ -254,10 +316,18 @@ main/
   zoo_sprites.*  generated by tools/gen_sprites.py — never edit by hand
   selftest.c/h   raw panel exercise, bypasses LVGL entirely
   boot_mode.h    which of the three the build brings up
-  console.c/h    the REPL on the log UART; owns no commands
+  console.c/h    the REPL on the log UART; owns no commands, only registration
+  storage.h      the shared NVS namespace; keys stay with the module that owns them
+  net.c/h        esp_netif + the default event loop; "is there an address yet"
   wifi_cmd.c/h   the wifi_* console commands
   wifi_creds.c/h Wi-Fi credentials in NVS — the only way one gets in
-  main.c         boot path: NVS -> commands -> console -> display -> UI -> fade up
+  wifi_sta.c/h   the station: associates, reconnects with backoff
+  time_sync.c/h  SNTP, and the timezone in NVS; starts on got-IP
+  time_cmd.c/h   the time and tz console commands
+  ota.c/h        firmware updates, and the rollback confirmation
+  ota_cmd.c/h    the ota, ota_status and reboot console commands
+  main.c         boot path: NVS -> commands -> console -> display -> UI -> fade
+                 -> net -> ota -> time -> wifi
 assets/          sprite PNGs; the source of truth for the art
 tools/
   capture.py     serial capture that survives a USB replug
@@ -270,6 +340,13 @@ docs/
 The console comes up **before** the display. It owns no hardware the display
 wants, and it is the only way to repair a board whose credentials are wrong — a
 UI failure should not take the repair path down with it.
+
+The three network modules — `ota`, `time_sync`, `wifi_sta` — can be started in
+any order. Each one that waits on an address also checks for an address that
+already exists, so none of them depends on running before or after the radio.
+That is why `net.c` exists: `esp_netif_init()` and the default event loop belong
+to no feature, and whichever module created them would silently have become the
+one the others had to follow.
 
 `ui.c` touches no pin, clock or panel command — it depends on `display.h` only
 for the panel dimensions and handles. That seam is what should carry to a second
