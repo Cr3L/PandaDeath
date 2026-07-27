@@ -6,6 +6,7 @@
 
 #include "console.h"
 #include "esp_console.h"
+#include "sun.h"
 #include "time_sync.h"
 #include "weather.h"
 
@@ -171,6 +172,56 @@ static int cmd_obs(int argc, char **argv)
     return 0;
 }
 
+/* Lives here rather than in a sun_cmd.c because sun.c holds no state at all —
+ * it is a function of coordinates and a date. The only state involved is the
+ * location, which belongs to this module, so this is where the command that
+ * reads it belongs. */
+static int cmd_sun(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    double lat, lon;
+    if (weather_location_get(&lat, &lon) != ESP_OK) {
+        printf("no location set — try: loc 39.64 -84.28\n");
+        return 1;
+    }
+    /* No network needed, but the date is still required, and an unsynced board
+     * would confidently report the sunrise of 1 January 1970. */
+    if (!time_sync_synced()) {
+        printf("the clock is not set yet — check time\n");
+        return 1;
+    }
+
+    const time_t now = time(NULL);
+    time_t rise, set;
+    if (sun_times(lat, lon, now, &rise, &set) != ESP_OK) {
+        printf("the sun neither rises nor sets there today\n");
+        return 0;
+    }
+
+    /* Rounded to the nearest minute, not truncated to it. strftime discards the
+     * seconds, so a sunrise at 06:31:39 prints as 06:31 while every published
+     * table says 06:32 — an apparent one-minute error in code that is accurate
+     * to well under that. */
+    rise += 30;
+    set += 30;
+
+    struct tm tm_rise, tm_set;
+    localtime_r(&rise, &tm_rise);
+    localtime_r(&set, &tm_set);
+    char rise_text[16], set_text[16];
+    strftime(rise_text, sizeof(rise_text), "%H:%M", &tm_rise);
+    strftime(set_text, sizeof(set_text), "%H:%M", &tm_set);
+
+    printf("sunrise: %s\n", rise_text);
+    printf("sunset:  %s\n", set_text);
+
+    const long daylight = (long)(set - rise);
+    printf("daylight: %ldh %02ldm\n", daylight / 3600, (daylight % 3600) / 60);
+    return 0;
+}
+
 static int cmd_weather_refresh(int argc, char **argv)
 {
     (void)argc;
@@ -255,6 +306,11 @@ static const esp_console_cmd_t COMMANDS[] = {
         .command = "weather",
         .help = "Show the last forecast and how close a thunderstorm is",
         .func = cmd_weather,
+    },
+    {
+        .command = "sun",
+        .help = "Sunrise and sunset for the stored location",
+        .func = cmd_sun,
     },
     {
         .command = "obs",
