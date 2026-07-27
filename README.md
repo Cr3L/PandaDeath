@@ -25,7 +25,12 @@ Verified on hardware:
   password, absent network, and credentials changed on a live station.
 - **The clock** — SNTP from `pool.ntp.org` a few seconds after the address
   arrives, with the timezone stored in NVS through a `tz` command.
-- **A partition table sized for OTA**, laid out before Wi-Fi on purpose.
+- **A partition table sized for OTA**, laid out before Wi-Fi on purpose — and
+  now used: the board installs firmware over the network into whichever slot it
+  is not running from. A new image is on probation until it reaches the network,
+  and reverts on the next reset if it never does, so a bad update costs a reboot
+  rather than a cable. Verified by installing an image built deliberately not to
+  confirm itself and watching it roll back.
 
 Not done: anything that uses the network for a purpose. The board knows who it
 is, where it is on the network and what time it is, and shows none of it — the

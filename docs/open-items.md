@@ -98,12 +98,20 @@ DRAM for the mapping.
 read-modify-write and WROVER PSRAM is roughly 10x slower, which would push
 render time past flush time.
 
-## 6. Stack smashing protection off
+## 6. Stack smashing protection off — **the trigger has fired**
 
-**Why it waits:** it costs a little size and speed, and catches a bug class the
-current code cannot produce — there is no parser here.
+**Why it waited:** it costs a little size and speed, and caught a bug class the
+code could not produce, because there was no parser.
 
-**Trigger:** the day an HTTP or JSON parser lands.
+**Trigger, as written:** "the day an HTTP or JSON parser lands." That day was
+the OTA session — `esp_http_client` now parses headers and a chunked body from
+the network, on a task that also holds a flash writer.
+
+This is left as an open item rather than done silently only because turning it
+on changes every stack frame in the image and wants its own verification pass,
+not because the reason to wait still holds. It does not. This should be the
+first thing picked up next session: `CONFIG_COMPILER_STACK_CHECK_MODE_NORM`,
+then re-run the OTA matrix, which is now cheap to re-run.
 
 ## 7. The initial black clear paints an invisible frame
 
@@ -139,3 +147,33 @@ less information, and the whole path is unreachable while `app_main` wraps init
 in `ESP_ERROR_CHECK`.
 
 **Trigger:** the first caller that wants to survive a failed `display_init()`.
+
+## 10. OTA is plain HTTP
+
+`ota <url>` fetches over unencrypted HTTP, enabled deliberately with
+`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`. On a LAN, initiated by a human typing a URL
+at a console, the exposure is that someone already inside the network could
+answer at that address with their own image.
+
+**Why it waits:** the certificate bundle is ~50 kB and TLS would have landed in
+the same change as the feature being tested, so a failure could have been either.
+It is genuinely unblocked now — certificate validation needs a correct clock, and
+SNTP supplies one.
+
+**Trigger:** the first update that comes from anywhere but this LAN. Also worth
+doing sooner if the board is ever exposed to a network with guests on it.
+
+## 11. `built:` in `ota_status` does not track source changes
+
+`esp_app_desc.c` is compiled once and not rebuilt when other sources change, so
+two images with different code can report the same build timestamp — observed
+directly during OTA testing, where two functionally different images both said
+`20:43:47`. The version string is `git describe`, so it only moves on a commit
+and reads `-dirty` in between.
+
+**Why it waits:** slot alternation and observed behaviour distinguished the
+images perfectly well during testing, so nothing was blocked.
+
+**Trigger:** the first time an update has to be identified after the fact rather
+than during a session that just built it — which is the first update that
+matters. A `version.txt` read by IDF as `PROJECT_VER` is the small fix.

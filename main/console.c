@@ -17,12 +17,25 @@ static const char *TAG = "console";
  * see console_forget_history(). */
 #define CONSOLE_HISTORY_LINES 4
 
+/* Commands run on the REPL's own task, so this is the stack every command gets.
+ * The default 4 kB was fine while the deepest command formatted a timestamp,
+ * and is not fine now that `ota` runs an HTTP client and a flash writer on it:
+ * IDF's own OTA examples give that work a dedicated 8 kB task.
+ *
+ * Raising the shared stack rather than spawning a task for the update is the
+ * cheaper of the two. A task would need a completion handshake back to the
+ * command that started it, so the console can block and report — machinery
+ * whose only purpose would be to keep a number in this file small. The cost is
+ * 4 kB of DRAM on one task that already exists. */
+#define CONSOLE_TASK_STACK 8192
+
 esp_err_t console_init(void)
 {
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_config.prompt = "panda>";
     repl_config.max_history_len = CONSOLE_HISTORY_LINES;
+    repl_config.task_stack_size = CONSOLE_TASK_STACK;
 
     esp_console_dev_uart_config_t uart_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
 

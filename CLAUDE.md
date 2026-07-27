@@ -49,6 +49,33 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash
 ```
 
+### Prefer OTA — the wired flash is now the fallback, not the loop
+
+The board updates itself over Wi-Fi. Michael starts a static file server
+(this is the one part an agent cannot do — binding a listening port is
+refused by the sandbox), and everything after it is agent-driven:
+
+```sh
+cd ~/Desktop/Babel/PandaDeath/build && python3 -m http.server 8000
+```
+
+```sh
+python tools/console.py --timeout 180 "ota http://<fedora-ip>:8000/pandadeath.bin"
+python tools/console.py "ota_status"     # next: shows an update waiting
+python tools/console.py "reboot"
+```
+
+`--timeout` is not optional for `ota`: the default ceiling is 5 s against a
+download of half a minute.
+
+**Two USB gestures per session became zero.** Reserve the wired flash for
+first flash of a board, and for recovery if both slots ever end up unbootable.
+
+An installed image is on probation until it reaches the network — see
+`ota.c`. If it never does, the next reset reverts it. That means **a bad
+update costs a reboot, not a cable**, and it also means `ota_status` saying
+"on probation" long after a reboot is a real signal, not noise.
+
 `/dev/ttyUSB0` is the board. `/dev/ttyACM0` on this machine is the laptop's
 fingerprint reader — not the board.
 
@@ -163,12 +190,15 @@ selftest.c/h   raw panel exercise, bypasses LVGL entirely
 boot_mode.h    which of the three the build brings up
 console.c/h    the REPL on the log UART; owns no commands, but owns registering them
 storage.h      the shared NVS namespace; keys stay with the module that owns them
+net.c/h        esp_netif + the default event loop; net_have_address()
 wifi_cmd.c/h   the wifi_* console commands
 wifi_creds.c/h Wi-Fi credentials in NVS — the only way one gets in
 wifi_sta.c/h   the station: associates, reconnects with backoff; owns the status enum
 time_sync.c/h  SNTP, and the timezone in NVS; starts on got-IP
 time_cmd.c/h   the time and tz console commands
-main.c         boot path: NVS → commands → console → display → UI → fade → net → time → wifi
+ota.c/h        firmware updates, and the rollback confirmation
+ota_cmd.c/h    the ota, ota_status and reboot console commands
+main.c         boot path: NVS → commands → console → display → UI → fade → net → ota → time → wifi
 ```
 
 Console commands live with the module whose state they touch, not in

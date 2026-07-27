@@ -7,8 +7,8 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "net.h"
 #include "storage.h"
 
 static const char *TAG = "time_sync";
@@ -136,20 +136,11 @@ esp_err_t time_sync_start(void)
                                             on_got_ip, NULL, NULL),
         TAG, "ip handler");
 
-    /* If an address already exists, the event this module waits for has already
-     * happened and will not happen again until the link drops. Catching that
-     * here is what lets this be called in any order relative to wifi_sta_start()
-     * — the alternative is a comment in the boot path saying "start me first",
-     * which is precisely the silent ordering constraint moving esp_netif_init()
-     * out of wifi_sta.c was meant to stop creating.
-     *
-     * The handle is looked up by key rather than taken from wifi_sta, so this
-     * still depends on having an address and not on which module supplied it.
-     * Before the station exists the lookup returns NULL, which is the normal
-     * boot case and not an error. */
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    esp_netif_ip_info_t ip;
-    if (sta != NULL && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0) {
+    /* If an address already exists, the event registered above has already
+     * fired and will not fire again until the link drops. Catching that is what
+     * lets this be called in any order relative to wifi_sta_start() — see
+     * net_have_address(), which exists for exactly this pattern. */
+    if (net_have_address()) {
         ESP_LOGI(TAG, "address already up; starting sntp now");
         return esp_netif_sntp_start();
     }

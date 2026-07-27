@@ -2,9 +2,15 @@
 
     python3 tools/console.py wifi_show
     python3 tools/console.py "wifi_set TestNetwork hunter2" wifi_show
+    python3 tools/console.py --timeout 120 "ota http://192.168.1.125:8000/pandadeath.bin"
 
 Each argument is one command line, sent in order; everything the board prints
-back is echoed here. Exists because `idf.py monitor` needs a real terminal, so
+back is echoed here.
+
+`--timeout` raises the per-command ceiling from the default 5 s. Needed for
+`ota`, which streams a megabyte and a half and reports progress as it goes;
+without it the reply is cut off mid-download and a working update looks like a
+hung one. Exists because `idf.py monitor` needs a real terminal, so
 an agent cannot use it — but the console is just line-oriented text over the
 same UART that capture.py already reads, and that needs no terminal at all.
 Before this, every console check cost a human typing at a prompt.
@@ -31,15 +37,27 @@ import serial
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
-# How long to keep reading after a command before deciding the reply is over.
-# The console answers in microseconds; this is slack for a busy LVGL task
-# holding the CPU, not a guess at how long a command takes.
+# How long the board must be quiet before the *initial* flush is considered
+# done. Replies are no longer timed at all — see PROMPT — so this governs only
+# the boot log and prompt noise cleared before the first command is sent.
 QUIET_TIME = 0.4
 
-# Ceiling on any one command, measured from when the read started rather than
-# from the last byte. A board logging continuously — which is what Wi-Fi
-# reconnect attempts look like — refreshes the quiet timer forever and would
-# otherwise never let go.
+# The board reprints this when a command finishes, so a reply is over when it
+# appears — not when the line goes quiet.
+#
+# Silence was the original test and it is wrong for anything slow. `ota` writes
+# a megabyte and a half to flash between progress lines, and a wrong URL sits on
+# a ten-second connect timeout saying nothing at all; both look identical to a
+# finished command. Two working updates were reported as truncated before this
+# was fixed by asking the board rather than timing it.
+#
+# Owned by console.c's repl_config.prompt; kept as one constant here so the two
+# places this file needs it cannot disagree with each other.
+PROMPT = "panda>"
+
+# Default ceiling on any one command, raised per-invocation with --timeout.
+# A backstop for a command that never returns a prompt at all; anything that
+# legitimately takes longer than this should say so on the command line.
 REPLY_TIMEOUT = 5.0
 
 
@@ -61,8 +79,33 @@ def drain(port: serial.Serial, settle: float) -> bytes:
     return bytes(out)
 
 
+def read_reply(port: serial.Serial, ceiling: float) -> bytes:
+    """Read until the prompt comes back, or the ceiling is hit."""
+    out = bytearray()
+    started = time.time()
+    while time.time() - started < ceiling:
+        chunk = port.read(256)
+        if chunk:
+            out += chunk
+            # Only the tail is checked, so a command that merely mentions the
+            # prompt in its own output cannot end its own reply early.
+            if out.rstrip().endswith(PROMPT.encode()):
+                break
+    return bytes(out)
+
+
 def main() -> int:
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+
+    ceiling = REPLY_TIMEOUT
+    if args and args[0] == "--timeout":
+        if len(args) < 2:
+            print(__doc__, file=sys.stderr)
+            return 2
+        ceiling = float(args[1])
+        args = args[2:]
+
+    if not args:
         print(__doc__, file=sys.stderr)
         return 2
 
@@ -79,10 +122,10 @@ def main() -> int:
         port.write(b"\n")
         drain(port, QUIET_TIME)
 
-        for command in sys.argv[1:]:
+        for command in args:
             print(f"$ {command}")
             port.write(command.encode() + b"\r\n")
-            reply = drain(port, QUIET_TIME).decode(errors="replace")
+            reply = read_reply(port, ceiling).decode(errors="replace")
             # The console echoes what was typed and re-prints the prompt around
             # the answer. Both are noise once the command is known, so only the
             # lines between them are shown.
@@ -90,7 +133,7 @@ def main() -> int:
                 stripped = line.strip()
                 if not stripped or stripped == command:
                     continue
-                print(f"  {stripped.removeprefix('panda>').strip()}")
+                print(f"  {stripped.removeprefix(PROMPT).strip()}")
 
     return 0
 
