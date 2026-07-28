@@ -22,7 +22,8 @@ Verified on hardware:
 - **Display** — colour, geometry, orientation and refresh all confirmed.
 - **LVGL 9** on top of it via `esp_lvgl_port`.
 - **The zoo** — four pixel-art animals walking in turn, from PNGs in `assets/`
-  compiled to C sprite tables. This is what the board shows today.
+  compiled to C sprite tables. Kept as a working screen and selectable through
+  `BOOT_MODE`, but it is no longer what the board boots into.
 - **A serial console** on the log UART, and **Wi-Fi credentials in NVS**
   entered through it. Confirmed surviving a power cycle.
 - **Wi-Fi** — the station reads those credentials at boot, associates, and
@@ -66,7 +67,146 @@ Verified on hardware:
 where it is, what time it is, what the instruments say, and whether a
 thunderstorm is coming — and shows all of it on the glass.
 
-Why the weather service is worth naming: `api.weather.gov` is free, needs no
+## Thunderstorms
+
+This is the thing the board is *for*. Everything else on the glass is evidence
+for one question: **is a thunderstorm coming, and how soon?**
+
+### How a storm is found
+
+The forecast is the NWS twelve-hourly product — periods named "This Afternoon",
+"Tonight", "Wednesday". Each carries a short text and a probability of
+precipitation. A period counts as stormy when its text mentions *thunder* at
+all; the substring match is deliberately loose, because the service writes
+"Chance Showers And Thunderstorms", "Scattered Thunderstorms" and "Severe
+Thunderstorms" and the board should not be a list of the phrasings it happens to
+know.
+
+The **first** such period within two days sets the state:
+
+| State | Means | Colour |
+|---|---|---|
+| `none` | no thunder in the window | the device green |
+| `possible` | thunder mentioned, probability under 30% | yellow |
+| `likely` | thunder mentioned, 30% or more | deep orange |
+| `now` | the *current* period is the stormy one | red |
+
+Two days, not the full week the API returns: a storm on Thursday is a fact
+about Thursday, not something a desk ornament should be lit up about.
+
+### The dial
+
+The rim arc fills with **nearness × probability**, not with either alone.
+
+Nearness is linear over a 48-hour horizon and pinned to full once the storm
+period has begun. Filling on nearness alone was the first version and it was
+wrong across a room: a 19% chance five hours out filled almost the entire ring
+and said *imminent* about something that would probably not happen. Multiplying
+by probability means the ring is only dramatic when a storm is both close and
+likely, and colour still carries probability by itself, so a distant certainty
+is not mistaken for calm.
+
+An unstated probability is treated as **certain**, not as zero. NWS omits the
+field on some periods, and a period whose text says "thunderstorms" must not
+read as a clear sky because a number was missing.
+
+### Reading the face
+
+Top to bottom, on a screen about eleven characters wide:
+
+```
+        ╭─────────────╮        ← the rim arc: nearness × probability
+        │     2 h     │        ← headline, 28pt, in the storm colour
+        │  Tonight 61%│        ← the period's own name, and probability of rain
+        │             │
+        │  Severe T…  │        ← watch line, only when one is active
+        │  84°F dew 68│
+        │  1013 mb ↓  │
+        │  gust 24    │
+        │   7:42 PM   │        ← the clock, small and deliberately dateless
+        ╰─────────────╯
+```
+
+**The headline is a countdown, not a label.** `2 h` is the time until the storm
+period begins; over a day out it becomes `1 d 6 h`. Two other values appear
+there: `NOW` when the current period is the stormy one, and `CLEAR` when
+nothing is in the window. `--` means no forecast has arrived yet — a cold boot
+takes about a minute, and a blank middle would be indistinguishable from a
+screen that has stopped updating.
+
+**The subtitle is the other half of the same sentence.** The headline answers
+*how long*; this says what the question was. It carries the period name NWS
+itself uses — "Tonight", "Monday Night" — and the probability, and deliberately
+never says the word "storm": the arc, the colour and the countdown have all said
+that already.
+
+**The percentage is a chance of rain, not of thunder.** It is
+`probabilityOfPrecipitation` for a period whose text mentions thunder. See the
+last subsection — the true thunder probability is not available at this size.
+
+Then the three evidence lines. The headline claims a storm is coming; these are
+why anyone should believe it, ordered as that argument:
+
+| Line | | |
+|---|---|---|
+| `84°F dew 68` | **fuel** | the *measured* temperature, not the forecast's, and dewpoint |
+| `1013 mb ↓` | **machinery** | station pressure, with the board's own three-hour trend |
+| `gust 24` / `wind 12` | **machinery** | mph; a gust displaces the steady wind whenever one is reported |
+| `7:42 PM` | **context** | the next sun event, or the clock |
+
+Four things about those are worth knowing:
+
+- **Dewpoint rather than humidity**, because 58% means nothing without a
+  temperature beside it while a 68° dewpoint means "muggy" to anybody.
+- **The temperature is the observation, not the forecast**, and the two differ
+  by several degrees routinely — one is what the forecast office expects for
+  this half of the day, the other is what an instrument recorded a few miles
+  away twenty minutes ago.
+- **The pressure arrow is a direction, not a figure.** The number is three
+  characters this screen does not have, and the direction is the whole of what
+  a falling barometer means. It appears only past ±0.5 mb over three hours, and
+  not at all until two hours of readings exist — the history lives in RAM, so
+  every restart and every OTA starts that clock over.
+- **A gust displaces the wind** rather than joining it: a gust front ahead of a
+  storm is exactly the moment this screen is worth looking at, and on a quiet
+  day there is no gust to show.
+
+**Anything the station did not report is simply absent**, never a dash. Fields
+arrive individually null on ordinary days. The console's `wx` table has a fixed
+shape so a gap is visibly a gap; the glass has eleven characters a line and
+should spend them on what is known.
+
+The readings, the clock and the sun are all drawn **before** the forecast is
+checked, so they survive a forecast fetch that is still failing. The sun line in
+particular needs no network at all and is the last thing left when everything
+else has gone.
+
+Those three lines replaced eight rotating thunderstorm facts. The facts were
+charming for a day; on a device that is on all day they get memorised, and
+memorised text stops being read.
+
+### Alerts
+
+Active NWS watches and warnings are polled every five minutes, against thirty
+for the forecast — an alert half an hour late has missed the weather it was
+warning about, and a forecast has not.
+
+The two are treated differently on purpose, because they mean different things.
+A **Warning** means it is happening: it takes over the whole screen in crimson.
+A **Watch** means conditions are favourable hours out: it gets one line, and the
+rest of the screen carries on.
+
+### What it cannot do yet
+
+The forecast text is prose, so "Chance Showers And Thunderstorms" yields a
+*precipitation* probability and no separate thunder probability. NWS publishes
+`probabilityOfThunder` as a real hourly field, but only in the raw gridpoint
+document — 292 kB, which needs a streaming parser rather than the fetch-then-
+parse this uses. It is [open item 12](docs/open-items.md).
+
+## The weather service
+
+Why `api.weather.gov` is worth naming: it is free, needs no
 API key, and is run by the agency that issues the forecasts. The cost is that
 it covers **the United States only**, and that it is a two-request API — the
 `/points` endpoint returns which forecast grid a coordinate falls in, and the
@@ -325,7 +465,14 @@ a fault:
 |---|---|---|
 | `BOOT_MODE_SELFTEST` | the panel alone, no LVGL | a wiring, SPI or panel-config fault |
 | `BOOT_MODE_TEST_SCREEN` | LVGL, no assets | LVGL port or rendering fault |
-| `BOOT_MODE_ZOO` | LVGL plus the sprite tables | the normal build |
+| `BOOT_MODE_ZOO` | LVGL plus the sprite tables | a sprite or asset fault |
+| `BOOT_MODE_STORM` | LVGL plus the network | the normal build |
+
+`STORM` is a peer of `ZOO`, not a rung above it — worth stating because the
+ladder's whole value is that stepping down changes one thing. `ZOO` adds sprites
+to LVGL; `STORM` adds the network and uses no sprites at all, so going from one
+to the other swaps two variables and bisects nothing. To isolate a fault under
+the storm screen, step to `TEST_SCREEN`, which is genuinely below both.
 
 The self-test is a colour walk, a **static** geometry frame held 20 s, then a
 motion loop, talking straight to the panel with no LVGL involved. It is how a
@@ -347,6 +494,7 @@ correctness is an eyeball judgement, not a photo judgement.**
 main/
   display.c/h    panel hardware: pins, SPI, backlight, orientation, rect fills
   ui.c/h         LVGL port bring-up; picks which screen gets built
+  ui_storm.c/h   the storm screen: the dial, the countdown and the readings
   ui_zoo.c/h     the zoo screen: four animals, cycling
   ui_test.c/h    arc + counter, kept as a known-good LVGL reference
   zoo_sprites.*  generated by tools/gen_sprites.py — never edit by hand
