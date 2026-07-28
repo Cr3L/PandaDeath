@@ -31,13 +31,44 @@ static time_t julian_to_unix(double julian)
 esp_err_t sun_times(double latitude, double longitude, time_t when,
                     time_t *sunrise, time_t *sunset)
 {
-    const double julian_now = (double)when / 86400.0 + JULIAN_UNIX_EPOCH;
+    /* Which day this is, resolved in *local* time before any astronomy happens.
+     *
+     * Everything downstream of this is shown on a local clock, so the day has to
+     * be the local one. Two bugs live in getting this wrong, at opposite ends of
+     * the day, and each hides the other:
+     *
+     *   - Flooring the Julian date picks the previous day for any instant before
+     *     12:00 UTC, because Julian days begin at noon and so carry a .5 fraction
+     *     at midnight. East of Greenwich-minus-twelve that is every moment from
+     *     local midnight until mid-morning, and the board spent those hours
+     *     reporting yesterday's sunrise — which, since ui_storm.c asks whether
+     *     `now` is before sunrise, made it announce the sunset while the sunrise
+     *     was minutes away.
+     *   - Rounding instead moves the boundary to midnight UTC, which fixes the
+     *     morning and breaks the evening: at 23:59 EDT it is already tomorrow in
+     *     UTC, so the board would jump to tomorrow's times before bedtime.
+     *
+     * Snapping to local noon removes both. Noon is the farthest any instant can
+     * be from a date boundary, so the UTC day containing local noon is
+     * unambiguous for every real timezone offset.
+     *
+     * This is why the module reads the C library's timezone despite holding no
+     * state of its own: the zone is a property of the process, set once by
+     * time_sync, and asking for it is not the same as owning it. */
+    struct tm local;
+    localtime_r(&when, &local);
+    local.tm_hour = 12;
+    local.tm_min = 0;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;   /* let mktime decide; the rule may change across the year */
+    const time_t local_noon = mktime(&local);
 
-    /* Whole days since J2000, for the day containing `when`. The 0.0008 is a
-     * leap-second offset folded in by the usual formulation of this algorithm;
-     * it is under a minute and is kept only so the constants below match their
-     * published values. */
-    const double day = floor(julian_now - JULIAN_J2000 + 0.0008);
+    const double julian_now = (double)local_noon / 86400.0 + JULIAN_UNIX_EPOCH;
+
+    /* The 0.0008 is a leap-second offset folded in by the usual formulation of
+     * this algorithm; it is under a minute and is kept only so the constants
+     * below match their published values. */
+    const double day = round(julian_now - JULIAN_J2000 + 0.0008);
 
     /* Mean solar noon at this longitude, in days since J2000. East is positive,
      * so the longitude is subtracted: a place east of Greenwich reaches noon

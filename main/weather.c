@@ -186,7 +186,12 @@ static char s_stations_url[URL_MAX];
  * blocking flash access on the task driving the display, thousands of times a
  * day, for a value that changes only when someone types `loc`. The store stays
  * the source of truth; this is just the answer, kept. weather_location_set
- * updates it, which is the only way it can go stale. */
+ * updates it, which is the only way it can go stale.
+ *
+ * Guarded by s_lock, like everything else here that crosses tasks. It is read
+ * from the LVGL timer, the console and the poll task, and without the lock a
+ * `loc` landing between the two stores hands a reader a new latitude beside an
+ * old longitude — a coordinate in neither place. */
 static bool s_location_cached;
 static double s_latitude;
 static double s_longitude;
@@ -700,10 +705,18 @@ static esp_err_t parse_observation(const char *body, weather_obs_t *out, int *pr
         strlcpy(o.text, text->valuestring, sizeof(o.text));
     }
 
-    /* A document with a timestamp and no temperature is a station that is
-     * powered but not measuring. Treated as a failure so the next station is
-     * tried, rather than published as a reading with nothing in it. */
-    if (o.temperature == WEATHER_UNKNOWN) {
+    /* Usable if it measured *anything*, not specifically a temperature.
+     *
+     * Requiring a temperature was wrong, and a live severe thunderstorm showed
+     * why: the nearest station reported a 59 km/h gust and a dewpoint with its
+     * temperature field null, and this threw the whole document away — losing
+     * the most interesting reading of the storm to a missing field the screen
+     * would happily have left blank. Every field already carries a "not
+     * reported" state; the only document worth rejecting is one carrying no
+     * measurement at all, which is a station that is powered but not sensing. */
+    if (o.temperature == WEATHER_UNKNOWN && o.dewpoint == WEATHER_UNKNOWN &&
+        o.pressure == WEATHER_UNKNOWN && o.wind == WEATHER_UNKNOWN &&
+        o.gust == WEATHER_UNKNOWN && o.humidity == WEATHER_UNKNOWN) {
         err = ESP_ERR_NOT_FOUND;
         goto done;
     }
@@ -894,6 +907,7 @@ static esp_err_t poll_observation(void)
 
     const time_t now = time(NULL);
     esp_err_t err = ESP_ERR_NOT_FOUND;
+    esp_err_t first_error = ESP_OK;
     weather_obs_t parsed = {0};
     int tenths = WEATHER_UNKNOWN;
 
@@ -916,7 +930,19 @@ static esp_err_t poll_observation(void)
             strlcpy(parsed.station, stations[i], sizeof(parsed.station));
             break;
         }
+
+        /* Kept only if nothing has been reported yet, so the error that
+         * survives is the first station's rather than the last one's. One of
+         * the three nearest here answers /observations/latest with a 404 —
+         * it is listed but publishes nothing — and reporting that as the reason
+         * pointed at a service outage when the truth was one dud neighbour. */
+        if (first_error == ESP_OK) {
+            first_error = err;
+        }
         ESP_LOGD(TAG, "%s unusable: %s", stations[i], esp_err_to_name(err));
+    }
+    if (err != ESP_OK) {
+        err = first_error;
     }
     free(body);
 
@@ -944,9 +970,18 @@ static esp_err_t poll_once(void)
     if (s_forecast_url[0] == '\0') {
         ESP_RETURN_ON_ERROR(resolve_grid(), TAG, "resolve");
         ESP_LOGI(TAG, "grid resolved: %s", s_forecast_url);
+    }
 
-        /* Best effort, and after the forecast URL is in hand. A station list
-         * that cannot be read costs the observations and nothing else. */
+    /* Tested separately from the grid, not folded into resolving it.
+     *
+     * These come from the same /points response but they fail independently:
+     * the station list is a second request, and one 503 or one dropped
+     * association used to leave s_stations empty for the entire life of the
+     * boot — every later poll skipped this block because the *grid* had
+     * resolved, so poll_observation returned ESP_ERR_INVALID_STATE forever and
+     * only a reboot or a `loc` change recovered. Best effort still: a station
+     * list that cannot be read costs the observations and nothing else. */
+    if (s_stations[0][0] == '\0' && s_stations_url[0] != '\0') {
         esp_err_t serr = resolve_stations();
         if (serr != ESP_OK) {
             ESP_LOGW(TAG, "stations unresolved: %s", esp_err_to_name(serr));
@@ -1141,10 +1176,6 @@ esp_err_t weather_location_set(double lat, double lon)
     nvs_close(handle);
 
     if (err == ESP_OK) {
-        s_latitude = lat;
-        s_longitude = lon;
-        s_location_cached = true;
-
         /* The cached grid square belongs to the old coordinates. Clearing it
          * here rather than recomputing keeps this function free of network
          * work — the next poll resolves it, and fails visibly if it cannot. */
@@ -1161,6 +1192,9 @@ esp_err_t weather_location_set(double lat, double lon)
         s_pressure_next = 0;
         s_pressure_station[0] = '\0';
         portENTER_CRITICAL(&s_lock);
+        s_latitude = lat;
+        s_longitude = lon;
+        s_location_cached = true;
         s_report.fetched = 0;
         /* The forecast schedule belongs to the old coordinates too. Without
          * this the task holds the timestamp of the last fetch and declines to
@@ -1180,9 +1214,15 @@ esp_err_t weather_location_set(double lat, double lon)
 
 esp_err_t weather_location_get(double *lat, double *lon)
 {
-    if (s_location_cached) {
+    bool cached;
+    portENTER_CRITICAL(&s_lock);
+    cached = s_location_cached;
+    if (cached) {
         *lat = s_latitude;
         *lon = s_longitude;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (cached) {
         return ESP_OK;
     }
 
@@ -1207,8 +1247,10 @@ esp_err_t weather_location_get(double *lat, double *lon)
         return ESP_ERR_INVALID_STATE;
     }
 
+    portENTER_CRITICAL(&s_lock);
     s_latitude = *lat;
     s_longitude = *lon;
     s_location_cached = true;
+    portEXIT_CRITICAL(&s_lock);
     return ESP_OK;
 }

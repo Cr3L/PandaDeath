@@ -13,6 +13,9 @@
  * Deliberately holds no state and reads no NVS. It is given the coordinates
  * rather than fetching them, which keeps a module of pure astronomy from
  * depending on the weather service that happens to store where the board is.
+ * It does read the C library's timezone, to decide which local day it is being
+ * asked about — a property of the process, set once by time_sync, which asking
+ * for is not the same as owning.
  *
  * The algorithm is NOAA's, in the form usually written up as the "sunrise
  * equation": mean solar noon from the longitude, the sun's mean anomaly and
@@ -37,12 +40,14 @@
  * broken and nearly bought a fix for a bug that was not there.
  */
 
-/* Sunrise and sunset for the day containing `when`, as UTC timestamps.
+/* Sunrise and sunset for the *local* day containing `when`, as UTC timestamps.
  *
- * `when` selects the day in UTC, not in local time. For the continental US that
- * differs from the local day only for a query made between local midnight and
- * the UTC date rollover a few hours later, which is the middle of the night;
- * the answer then is the previous day's, off by a few minutes.
+ * Local, not UTC, because everything these feed is shown on a local clock. The
+ * day is resolved by snapping to local noon before any astronomy happens; noon
+ * is the farthest an instant can sit from a date boundary, so the answer does
+ * not depend on which side of midnight UTC the query lands. Getting this wrong
+ * produces a whole day's error at one end of the day or the other — see sun.c,
+ * where both directions have now been made and fixed.
  *
  * Returns ESP_ERR_INVALID_STATE where the sun does not rise or set at all —
  * above the Arctic circle in midsummer or midwinter. That is a real answer

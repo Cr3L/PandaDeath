@@ -230,6 +230,23 @@ static void set_text_if_changed(lv_obj_t *label, char *last, size_t last_len,
     }
 }
 
+/* And the same for a colour, for the same reason and a less obvious one.
+ *
+ * lv_obj_set_style_text_color ends in lv_obj_refresh_style, which invalidates
+ * unconditionally — it does not compare against the value already stored. So
+ * re-asserting an unchanged colour every tick costs exactly the redraw that
+ * guarding the text was meant to save, and the guard above looked like it was
+ * working while the screen was still being repainted six times a minute.
+ * `last` starts at zero, which is a real colour (black) but not one this screen
+ * uses, so the first call always writes. */
+static void set_text_color_if_changed(lv_obj_t *obj, uint32_t *last, uint32_t color)
+{
+    if (*last != color) {
+        *last = color;
+        lv_obj_set_style_text_color(obj, lv_color_hex(color), LV_PART_MAIN);
+    }
+}
+
 /* Joins two fields on one line, with the separator only where both exist.
  * Every line below is built this way, and spelling the conditional out each
  * time is where the missing-field bugs would live. */
@@ -353,6 +370,16 @@ static void set_alert_room(bool alert_visible)
 
 }
 
+/* Same guard for the arc's indicator, which was also re-asserted every tick. */
+static void set_arc_color_if_changed(uint32_t color)
+{
+    static uint32_t last;
+    if (last != color) {
+        last = color;
+        lv_obj_set_style_arc_color(s_arc, lv_color_hex(color), LV_PART_INDICATOR);
+    }
+}
+
 /* The clock goes rather than moving when something needs its space. Shifted
  * down with the readings it would land where the panel has curved away, and of
  * everything on this screen it is the line an active alert most clearly
@@ -408,15 +435,18 @@ static void refresh_cb(lv_timer_t *timer)
     /* Watches and advisories sit where the conditions line used to, which is
      * blank on an ordinary day — so anything appearing there means something. */
     set_alert_room(alert.level != WEATHER_ALERT_NONE);
-    if (alert.level == WEATHER_ALERT_NONE) {
-        lv_label_set_text(s_alert, "");
-    } else {
-        lv_label_set_text(s_alert, alert.event);
-        lv_obj_set_style_text_color(s_alert,
-                                    lv_color_hex(alert.level == WEATHER_ALERT_WATCH
-                                                 ? COLOR_LIKELY : COLOR_DIM),
-                                    LV_PART_MAIN);
-    }
+
+    /* Guarded like the rest. This was the one label written unconditionally,
+     * under a comment claiming every label on the screen was guarded — and an
+     * alert is the longest-lived string here, so it was also the one repainting
+     * for the longest. */
+    static char last_alert[sizeof(alert.event)];
+    static uint32_t last_alert_color;
+    const uint32_t alert_color = (alert.level == WEATHER_ALERT_WATCH)
+                                 ? COLOR_LIKELY : COLOR_DIM;
+    set_text_if_changed(s_alert, last_alert, sizeof(last_alert),
+                        alert.level == WEATHER_ALERT_NONE ? "" : alert.event);
+    set_text_color_if_changed(s_alert, &last_alert_color, alert_color);
 
     /* A snapshot, not the live struct: the poll task can rewrite it at any
      * moment, and half of one report beside half of another is a forecast that
@@ -464,10 +494,10 @@ static void refresh_cb(lv_timer_t *timer)
         snprintf(sub, sizeof(sub), "waiting for a forecast");
         color = COLOR_DIM;
         lv_arc_set_value(s_arc, 0);
-        lv_obj_set_style_arc_color(s_arc, lv_color_hex(COLOR_TRACK), LV_PART_INDICATOR);
+        set_arc_color_if_changed(COLOR_TRACK);
     } else {
         color = storm_color(r.storm);
-        lv_obj_set_style_arc_color(s_arc, lv_color_hex(color), LV_PART_INDICATOR);
+        set_arc_color_if_changed(color);
         lv_arc_set_value(s_arc, arc_value(&r, now));
 
         if (r.storm == WEATHER_STORM_NONE) {
@@ -511,8 +541,10 @@ static void refresh_cb(lv_timer_t *timer)
 
     /* Both carry the storm colour. The subtitle is the headline's own words, so
      * colouring only one of them would read as two unrelated lines. */
-    lv_obj_set_style_text_color(s_headline, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_sub, lv_color_hex(color), LV_PART_MAIN);
+    static uint32_t last_headline_color;
+    static uint32_t last_sub_color;
+    set_text_color_if_changed(s_headline, &last_headline_color, color);
+    set_text_color_if_changed(s_sub, &last_sub_color, color);
 }
 
 /* One of the three evidence lines. They differ only in where they sit, and
