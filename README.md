@@ -1,4 +1,4 @@
-# PandaDeath
+# StormTracker
 
 Custom firmware for the **BigTreeTech Knomi V1** — an ESP32-WROVER-E board with
 a 240×240 round GC9A01 display, originally a Klipper printer monitor.
